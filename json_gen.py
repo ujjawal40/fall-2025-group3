@@ -138,13 +138,13 @@ data_to_save = \
             - Evaluation of pseudo-label quality requires careful metric design.  
             """,
         # -----------------------------------------------------------------------------------------------------------------------
-        "Proposed by": "Tyler Wallett",
-        "Proposed by email": "twallett@gwu.edu",
+        "Proposed by": "Ujjawal Dwivedi",
+        "Proposed by email": "ujjawal.dwivedi@gwu.edu",
         "instructor": "Amir Jafari",
         "instructor_email": "ajafari@gwu.edu",
         "collaborator": "None",
-        "funding_opportunity": "Open Source Community Project",
-        "github_repo": "None",
+        "funding_opportunity": "Internship Extension",
+        "github_repo": "fall-2025-group3",
         # -----------------------------------------------------------------------------------------------------------------------
     }
 os.makedirs(
