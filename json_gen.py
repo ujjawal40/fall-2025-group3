@@ -39,72 +39,126 @@ data_to_save = \
         # -----------------------------------------------------------------------------------------------------------------------
         "Rationale":
             """
-            Semi-supervised learning is widely used when labeled data is limited, but manually labeling large datasets 
-            is time-consuming and costly. Pseudo-labeling allows models to leverage unlabeled data by assigning estimated 
-            labels, but existing heuristics may propagate errors and reduce model performance. 
+            We are starting by turning raw event logs (listings, price changes, sales) into clean, time-aligned
+            training examples that mirror the real decision: given a new listing today, what will it sell for if/when
+            it sells soon? Concretely, we pair each listing to its next recorded sale within a bounded window and build
+            strictly “as-of” features—property attributes, seasonality, and lagged ZIP-level signals—so the model
+            never sees the future.
 
-            By applying reinforcement learning to pseudo-labeling, students can develop an adaptive strategy that selects 
-            the most informative unlabeled examples and balances risk and reward in label assignment. This approach 
-            reduces labeling errors, improves model accuracy, and provides a scalable solution for leveraging unlabeled 
-            datasets in machine learning research.
-            """,
+            This framing gives us three immediate benefits at project kickoff:
+            1) **Validity:** eliminates common sources of label/feature leakage.
+            2) **Adaptability:** enables walk-forward, month-ahead evaluation that reflects deployment and surfaces
+            periods of stress early.
+            3) **Scalability:** Snowflake-native column pruning + chunked ingestion lets us train on millions of
+            episodes without expensive preprocessing outside the warehouse.
+
+            The initial baseline will use gradient-boosted trees to learn nonlinear relations between listing traits and
+            local market context, providing a strong, interpretable starting point. From there we can iterate toward
+            calibrated uncertainty, drift monitoring, and retraining cadences. The end goal is a robust, auditable
+            pricing service that reduces manual CMA effort, shortens listing cycles, and maintains accuracy across
+            changing market regimes.
+        """
         # -----------------------------------------------------------------------------------------------------------------------
-        "Approach":
+            "Methodology":
             """
-            [Understanding the Reinforcement Learning (RL) Framework] 
-            Students will learn how to formulate pseudo-labeling as an RL problem, including:
+                
+                
+             [Data ingestion & normalization (Snowflake-first)]
+            - Source table: `APIFY_SOLD_IN_7_DAYS_ENCODED`.
+            - Column pruning in-warehouse to cut I/O: keep all “as-of” listing attributes and drop
+            leakage/unused fields (e.g., raw `PRICE`, view counts, HOA text, materials, etc.).
+            - Chunked streaming to pandas (`CHUNK_ROWS_SNOWFLAKE=250k`) to scale to millions of rows.
+            - Parse/flatten JSON `PRICEHISTORY` so each historical event becomes a row; retain all original
+            columns + five transaction fields:
+            (`HISTORICAL_TRANSACTION_DATE`, `HISTORICAL_TRANSACTION_PRICE`, `HISTORICAL_EVENT_TYPE`,
+            `HISTORICAL_PRICE_CHANGE_RATE`, `HISTORICAL_DATA_SOURCE`).
+            - Hygiene filters: require ZIP + event type + valid date; keep prices in a plausible band
+            (10k–20M); light type coercions & memory down-casting.
 
-            - Understanding Markov Decision Process (MDP) assumptions and limitations: markov property, stationarity, limitations.
-            - Understanding sequential decision making: actions affect future states and rewards.
-            - Understanding terminal states and episodic tasks: pseudo-labeling epidode ends when all unlabeled data is processed.
-            - State space design: selecting features of unlabeled examples, model predictions, and uncertainty measures 
-            (e.g. [feature1, ..., featuren, softmax_predictions, cross_entropy]).
-            - Action space design: assign a pseudo-label or skip labeling an example (e.g. {0, 1, ..., 9} for MNIST).
-            - Reward design: reward high-confidence correct pseudo-labels and penalize incorrect assignments.
-            - Algorithm selection: evaluate classical RL methods such as Q-learning, and deep RL methods such as Policy Gradient approaches.
+            [Split the stream into LIST vs SOLD and add timestamps]
+            - Build two frames from the flattened events:
+            - **LIST** = rows where `HISTORICAL_EVENT_TYPE == "Listed for sale"`.
+            - **SOLD** = rows where `HISTORICAL_EVENT_TYPE == "Sold"`.
+            - Derive time features on each:
+            - Listing: `LIST_TRANSACTION_DATE`, `LIST_PRICE`, `LIST_TRANSACTION_YEAR/MONTH`,
+                month angle encodings (`LIST_MONTH_SIN/COS`).
+            - Sold:   `SOLD_TRANSACTION_DATE`, `SOLD_PRICE`, `SOLD_TRANSACTION_YEAR/MONTH`.
 
-            [`model.py` & `train.py`]
-            Students will learn how to adapt existing RL repositories for pseudo-labeling:
+            [Pairing strategy → “next sale within horizon”]
+            - For each listing, `merge_asof` **forward** on the same `ZPID` to the **next** sale within
+            `MAX_DAYS_TO_SALE` (configurable; used 360 for the baseline split and 180 for walk-forward).
+            - Compute `DAYS_TO_SALE`; drop pairs without a sale in the horizon. This mirrors the operational
+            question (“what will this listing sell for soon?”) and avoids matching to stale future sales.
 
-            - Utilize existing RL repos (e.g. `twallett` GitHub Repo: `rl-lecture-code`) with existing RL models (e.g. Policy Gradient, PPO Clip).
-            - Train RL agent on existing OpenAI Gymnasium environments (e.g. `CartPole-v1`) just to become familiar with code structure.
+            [Market context features with strict “as-of” semantics]
+            - Aggregate sold events by ZIP×month to form:
+            `ZIP_MEDIAN_PRICE`, `ZIP_MEAN_PRICE`, `ZIP_SALES_COUNT`.
+            - Shift each metric **by one month** and forward-fill within ZIP before joining, so the listing
+            at month m only sees information available *through m–1*.
+            - Backward `merge_asof` from listing date to the latest available ZIP stats.
+            - Derive `LIST_PRICE_RATIO = LIST_PRICE / ZIP_MEDIAN_PRICE` to normalize for local price level.
 
-            [`utils/env.py` & `test.py`]
-            Students will learn how to build a custom OpenAI Gymnasium environment for pseudo-labeling:
+            [Feature matrix construction]
+            - Exclude identifiers & future fields: `ZPID`, sold timestamps/prices, raw `PRICE`,
+            free-text, and leakage-prone attrs (see drop list).
+            - Coerce numeric-like strings (e.g., `SQFT`, beds/baths, school distances) to numbers;
+            treat remaining strings as categorical (passed natively to LightGBM).
+            - Fill numerics with 0; keep 16 categorical features (observed in baseline run).
 
-            - PseudoLabelEnv() & __init__() -> class: Initialize Custom OpenAI Gymnasium environment.
-            OpenAI Gymnasium Core Methods:
-            - self.reset() -> method/func: Reset environment to initial state.
-            - self.step(action) -> method/func: Take action (assign pseudo-label or skip) and return next_state, reward, done, info.
-            - (OPTIONAL) self.render() -> method/func: visualization of environment state.
-            - self.close() -> method/func: Clean up resources.
+            [Modeling: gradient-boosted trees baseline]
+            - Estimator: LightGBM regression with conservative defaults:
+            `learning_rate=0.05`, `num_leaves=127`, `max_depth=8`,
+            `min_data_in_leaf=150`, subsampling & feature fraction at 0.8.
+            - Early stopping (patience=50) over ≤1000 rounds.
+            - Metrics: MAE (primary), R² (reporting).
 
-            Additional Custom Pseudo-Labeling Methods:
-                Basic MDP Custom Methods:
-                - self.load_data() -> method/func: Load labeled and unlabeled datasets.
-                - self.split_data() -> method/func: Split data into training and test sets.
-                - self.get_state() -> method/func: Return feature representations for RL state.
-                - self.calculate_reward() -> method/func: Compute reward based on correctness of pseudo-label and downstream model performance.
+            [Evaluation protocols]
+            - **Single time split**: hold out the most recent 24 months by listing date to mimic deployment
+            and check headline generalization (baseline MAE ≈ $30k, R² ≈ 0.93).
+            - **Walk-forward backtest (expanding window)**:
+            - Require ≥24 months of training.
+            - Evaluate one month ahead per fold (step=1), over the full history.
+            - Overall across ≈1.6M validation rows: MAE ≈ $24.7k, R² ≈ 0.925.
+            - Persist per-row predictions to `/tmp/walkforward_preds.csv` and stage to `@~` for audits.
+            - Visualization: monthly MAE and R² trajectories, plus MAE-vs-R² scatter sized by fold rows,
+            to surface regime stress (e.g., spikes around late-2021/2022).
 
-                Downstream Model Custom Methods:
-                - DownstreamModel() & __init__() -> class: Initialize Downstream DL Model (MLP or CNN).
-                - self.train_downstream_model() -> method/func: Train model on labeled + pseudo-labeled data.
+            [Operationalization & guardrails]
+            - Scalability: all heavy lifting stays close to Snowflake; pandas only holds the active
+            working set (chunk iterator + memory reduction).
+            - Reproducibility: fixed random seed; deterministic pairing; explicit feature drops.
+            - Leakage checks: (1) forward pairing with tolerance; (2) ZIP stats shifted and joined
+            backward; (3) time-based validation only.
+            - Artifacts & audit: keep pairing horizons, feature lists, LightGBM params, and monthly
+            metrics under version control; store fold-level predictions for post-hoc error slicing.
 
-                Evaluation Custom Methods:
-                - evaluate_pseudo_labels() -> method/func: Compare pseudo-labels with ground truth for evaluation.
-                - get_cum_rew() -> method/func: Compute cumulative reward over an episode.
-                - get_classification_metric_gain() -> method/func: Measure improvement in downstream model using pseudo-labels.
+            [Repository layout (proposed from the notebook cells)]
+            - `data/ingest.py`            → create_complete_property_dataset(...)
+            - `data/pairing.py`           → pair_listing_to_next_sold(...)
+            - `features/zip_lags.py`      → make_zip_monthly_shifted(...)
+            - `features/matrix.py`        → build_feature_matrix(...)
+            - `models/lgbm.py`            → train/evaluate LightGBM
+            - `eval/walkforward.py`       → walk_forward_backtest(...)
+            - `viz/report.py`             → plots for MAE/R² over time, extremes, scatter
+            - `configs/*.yaml`            → horizons, drops, LightGBM params, split policy
 
-            - `test.py` similar to `train.py` but for evaluating trained RL agent on unseen data.
+            [What we will tackle next]
+            - Price-only vs. joint objective with `DAYS_TO_SALE` (multi-task or two-stage).
+            - Calibration: conformal intervals or quantile boosting for P50/P90 bands.
+            - Drift monitoring: ZIP-level rolling error, alerting on spike patterns like 2021–2022.
+            - Segment diagnostics: error by price tier, home type, geography, days-to-sale buckets.
+            - Retraining cadence: monthly refresh with expanding window; backtest-gated promotion.
+            - Feature extensions (still “as-of”): mortgage rate at list date, county-level DOM,
+            supply/demand indices already available in the table, and broker-provided attributes.
 
-            [`benchmark.py`]
-            Students will learn how to systematically evaluate pseudo-labeling approaches:
+            [`train.py` & `backtest.py` mapping]
+            - `train.py`: run the single 24-month holdout pipeline end-to-end; emit model, features,
+            metrics, and SHAP/importance plots.
+            - `backtest.py`: run the expanding walk-forward; write per-fold metrics + predictions to stage;
+            generate all figures used in reviews.
 
-            - Run experiments with different RL algorithms and hyperparameters.
-            - Run experiments with different datasets.
-            - Record pseudo-labeling performance and downstream model classification metrics.
-            - Export results for analysis.
-            """,
+        """
+
         # -----------------------------------------------------------------------------------------------------------------------
         "Timeline":
             """
@@ -121,22 +175,102 @@ data_to_save = \
         # -----------------------------------------------------------------------------------------------------------------------
         "Research Contributions":
             """
-            This project will contribute to machine learning research by providing an open-source RL framework for 
-            adaptive pseudo-labeling in semi-supervised learning. The methodology will enable researchers to assign 
-            high-quality pseudo-labels to unlabeled data, improving model performance and reducing labeling costs. 
-            Research findings can be published in academic journals or conferences, and the framework will be made 
-            available for future researchers to extend and apply to new datasets.
-            """,
+            1) Leakage-safe supervision from event logs  
+            - We formalize a general pairing strategy that converts raw listing/price-change/sale events into supervised 
+                (listing → next-sale) examples with a configurable horizon, avoiding peeking into post-listing information.  
+            - We contribute a principled “as-of” feature rule set (backward joins + one-month-shifted aggregates) that can be 
+                reused in other temporal-leakage-prone domains.
+
+            2) Scalable Snowflake-native data engineering pattern  
+            - A push-down ETL design that parses/flat-tens JSON histories in-warehouse, prunes columns before egress, and 
+                streams in 250k-row chunks—demonstrated on ~9M+ transactional rows.  
+            - Memory-aware pandas utilities (type coercion, downcasting) that make large-scale experimentation accessible on 
+                commodity compute.
+
+            3) Market-context features with strict “as-of” semantics  
+            - A reusable recipe for locality aggregates (ZIP×month median/mean price and sales count), shifted and forward-filled 
+                to guarantee only pre-listing information is used.  
+            - A simple but powerful normalization (`LIST_PRICE_RATIO = LIST_PRICE / ZIP_MEDIAN_PRICE`) that improves cross-region 
+                comparability.
+
+            4) Transparent time-series evaluation protocols  
+            - A deployment-faithful **24-month holdout** and an **expanding walk-forward backtest** (monthly steps) with per-fold 
+                MAE/R², per-row predictions, and audit-ready artifacts.  
+            - Visualization suite (MAE/R² timelines, MAE↔R² scatter sized by fold rows) to reveal market-regime stress 
+                (e.g., 2021–2022 volatility) and drift.
+
+            5) Strong, simple baseline with clear extension hooks  
+            - A LightGBM baseline (no deep feature stacks) delivering competitive accuracy (≈$25k MAE, R²≈0.93 in walk-forward) 
+                that sets a clean yardstick for future work.  
+            - Drop-in hooks for quantile/conformal prediction, multi-task learning with `DAYS_TO_SALE`, and richer macro features 
+                (rates, supply/demand).
+
+            6) Generalizable methodology beyond real estate  
+            - The event-pairing + “as-of” feature pattern applies to other verticals (autos, rentals, e-commerce resale) where 
+                listing and sale events are observed and leakage risks are high.
+
+            7) Open research artifacts (code & specs)  
+            - We plan to release the framework as open-source code: Snowflake SQL templates, pairing/feature builders, 
+                walk-forward harness, and visualization scripts—plus a synthetic (non-proprietary) benchmark mirroring class 
+                balances and temporal structure for reproducibility.
+
+            8) Empirical and methodological insights  
+            - Evidence that careful temporal hygiene + simple locality context captures a large share of signal, offering a 
+                strong baseline before complex models.  
+            - Practical guidance on horizon selection, regime-aware evaluation, and operational guardrails for production pricing.
+
+            Collectively, these contributions provide a scalable, audit-friendly blueprint for building and evaluating 
+            listing-time price models. Results and tooling are suitable for technical reports, industry data-science venues, 
+            and as a starting point for academic investigations into leakage-aware learning and uncertainty quantification 
+            in transactional forecasting.
+        """
+
         # -----------------------------------------------------------------------------------------------------------------------
         "Possible Issues":
             """
-            - Reinforcement Learning concepts can be difficult for students to grasp, especially MDP assumptions.  
-            - Designing state, action, and reward spaces for pseudo-labeling may be non-trivial.  
-            - Training RL agents can be computationally expensive and time-consuming.  
-            - Risk of overfitting to small datasets or poor generalization to new unlabeled data.  
-            - Debugging custom environments and reward functions can be challenging.  
-            - Evaluation of pseudo-label quality requires careful metric design.  
-            """,
+                    - **Temporal leakage hazards**
+          - Market aggregates (ZIP median/mean price, sales count) must be computed strictly **as-of** the listing date; any same-month look-ahead leaks.
+          - Non-event covariates (e.g., “HOTNESS_SCORE”, mortgage rates) may be published with latency—using month-t values at time-t listing can still leak future knowledge unless shifted.
+          - Multiple listings/price changes per property can reveal future outcomes if not carefully filtered.
+
+        - **Pairing & censoring biases (listing → next sold)**
+          - The merge-as-of pairing assumes the **next** sold event within `MAX_DAYS_TO_SALE` belongs to the listing; relists, flips, or title transfers can mis-pair.
+          - Right-censoring: listings that never sell within the window are dropped, biasing toward faster-selling homes and understating uncertainty.
+          - Window choice inconsistency (e.g., 360 days in the single holdout vs. 180 in the walk-forward) can make results hard to compare.
+
+        - **Aggregation sparsity & staleness**
+          - Many ZIP×month cells are empty; the 1-month shift + forward-fill avoids leakage but can propagate stale values in low-liquidity areas.
+          - Missingness handling in EDA (monthly `asfreq`) produced **0 valid ZIP series** with ≥36 periods due to long global ranges; this can hide useful shorter local histories.
+
+        - **Feature hygiene & proxies**
+          - Some demographic features (race/ethnicity shares, income) or their proxies raise **fair housing** and compliance concerns; even if dropped at serve-time, they can contaminate training.
+          - High-cardinality categoricals (e.g., CITY, ZIPCODE) can memorize idiosyncrasies; need regularization, target encoding with **strict time folds**, or careful use as categories.
+
+        - **Metric sensitivity & regime shifts**
+          - MAE is dominated by expensive markets; per-price-band MAE, quantile loss, and calibration checks are needed.
+          - 2011–2014 and 2021–2022 show stress: spikes in MAE with still-high R² indicate **distribution shift**; a single global model may underperform in regime changes.
+
+        - **Modeling pitfalls**
+          - LightGBM with many weakly-informative features can overfit without robust time-based validation and monotonic/interaction constraints.
+          - Using only month sin/cos may under-capture seasonality vs. weekly dynamics; weekly city signals didn’t translate to monthly ZIP analysis during EDA.
+          - Label noise (recording errors, concessions, non-arm’s-length sales) caps achievable accuracy.
+
+        - **Evaluation & comparability**
+          - The single 24-month holdout and the monthly walk-forward use different pairing horizons; report both or harmonize to avoid mixed conclusions.
+          - Early folds have tiny sample sizes—variance is high; aggregate headlines should weight by rows.
+
+        - **Compute, cost, and ops**
+          - 9M+ events → 1.6–1.8M training pairs: memory pressure, long wall-clock, and egress costs from Snowflake.
+          - Per-fold LightGBM training + prediction can be expensive; need job orchestration, deterministic seeds, and artifact caching.
+
+        - **Reproducibility**
+          - Chunked ingestion + random sampling must pin seeds and ordering; schema changes in the warehouse can silently break feature contracts.
+          - Version and stage your “as-of” feature SQL, pairing rules, and model configs to ensure auditability.
+
+        - **Scope creep**
+          - Mixing price-level prediction with time-to-sale (DAYS_TO_SALE) as a secondary objective without clear multi-task design can blur targets and degrade both.
+        """,
+
         # -----------------------------------------------------------------------------------------------------------------------
         "Proposed by": "Ujjawal Dwivedi",
         "Proposed by email": "ujjawal.dwivedi@gwu.edu",
