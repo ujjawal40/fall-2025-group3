@@ -7,4 +7,4 @@ import seaborn as sns
 data = pd.read_csv('sub_sample.csv')
 
 # Explore the data
-print(data.head())
+print(data.head(5))
