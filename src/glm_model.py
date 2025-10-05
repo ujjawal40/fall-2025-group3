@@ -1,11 +1,11 @@
-"""Utility helpers and a command line runner for Tweedie GLM regression."""
+"""Command line utilities and helpers for Tweedie GLM regression workflows."""
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,16 +29,56 @@ class GLMConfig:
 
 
 @dataclass
-class GLMWorkflow:
-    """End-to-end training workflow for a Tweedie GLM."""
+class GLMTrainingArtifacts:
+    """Container for validation data and diagnostic artefacts."""
 
-    config: GLMConfig
-    scaler: Optional[StandardScaler] = None
-    model: Optional[TweedieRegressor] = None
+    metrics: Dict[str, float]
+    y_valid: np.ndarray
+    predictions: np.ndarray
+    feature_names: Sequence[str]
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Fit the model and return validation labels and predictions."""
 
+@dataclass
+class GeneralizedLinearRegressionModel:
+    """Train and evaluate a Tweedie-based generalised linear regression model."""
+
+    config: GLMConfig = field(default_factory=GLMConfig)
+    scaler: Optional[StandardScaler] = field(default=None, init=False)
+    model: Optional[TweedieRegressor] = field(default=None, init=False)
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> Tuple[TweedieRegressor, Dict[str, float]]:
+        """Fit the GLM to the provided dataset and return validation metrics."""
+        model, metrics, _y_valid, _predictions = self._fit_internal(X, y)
+        return model, metrics
+
+    def fit_with_artifacts(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        *,
+        feature_names: Sequence[str],
+    ) -> GLMTrainingArtifacts:
+        """Fit the GLM and retain artefacts for visualisation."""
+        model, metrics, y_valid, predictions = self._fit_internal(X, y)
+        return GLMTrainingArtifacts(
+            metrics=metrics,
+            y_valid=y_valid,
+            predictions=predictions,
+            feature_names=feature_names,
+        )
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Generate predictions using the fitted GLM."""
+        if self.model is None or self.scaler is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        transformed = self.scaler.transform(X)
+        return self.model.predict(transformed)
+
+    def _fit_internal(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+    ) -> Tuple[TweedieRegressor, Dict[str, float], np.ndarray, np.ndarray]:
         X_train, X_valid, y_train, y_valid = train_test_split(
             X,
             y,
@@ -50,24 +90,26 @@ class GLMWorkflow:
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_valid_scaled = self.scaler.transform(X_valid)
 
-        self.model = TweedieRegressor(
+        model = TweedieRegressor(
             power=self.config.power,
             alpha=self.config.alpha,
             l1_ratio=self.config.l1_ratio,
             max_iter=self.config.max_iter,
         )
-        self.model.fit(X_train_scaled, y_train)
+        model.fit(X_train_scaled, y_train)
+        self.model = model
 
-        predictions = self.model.predict(X_valid_scaled)
-        return y_valid, predictions
+        predictions = model.predict(X_valid_scaled)
+        metrics = self._compute_metrics(y_valid, predictions)
+        return model, metrics, y_valid, predictions
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """Generate predictions with the fitted GLM."""
-
-        if self.model is None or self.scaler is None:
-            raise RuntimeError("Model must be fitted before predicting.")
-        transformed = self.scaler.transform(X)
-        return self.model.predict(transformed)
+    @staticmethod
+    def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+        """Compute RMSE, MAE, and :math:`R^2` metrics."""
+        rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+        mae = float(mean_absolute_error(y_true, y_pred))
+        r2 = float(r2_score(y_true, y_pred))
+        return {"rmse": rmse, "mae": mae, "r2": r2}
 
 
 def load_dataset(
@@ -76,9 +118,8 @@ def load_dataset(
     *,
     feature_columns: Optional[Iterable[str]] = None,
     dropna: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Load the CSV file and return features, targets, and the feature names."""
-
+) -> Tuple[np.ndarray, np.ndarray, Sequence[str]]:
+    """Load a CSV file and return feature/target arrays with feature names."""
     dataframe = pd.read_csv(csv_path)
     if dropna:
         dataframe = dataframe.dropna(subset=[target_column])
@@ -96,164 +137,129 @@ def load_dataset(
     if not feature_columns:
         raise ValueError("No numeric feature columns were provided for training.")
 
-    features = dataframe[feature_columns].to_numpy(dtype=float)
-    target = dataframe[target_column].to_numpy(dtype=float)
-    return features, target, feature_columns
+    X = dataframe[feature_columns].to_numpy(dtype=np.float64)
+    y = dataframe[target_column].to_numpy(dtype=np.float64)
+    return X, y, feature_columns
 
 
-def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """Compute standard regression metrics for validation output."""
-
-    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    mae = float(mean_absolute_error(y_true, y_pred))
-    r2 = float(r2_score(y_true, y_pred))
-    return {"rmse": rmse, "mae": mae, "r2": r2}
-
-
-def plot_predictions(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    output_dir: Path,
-    *,
-    title: str = "Actual vs Predicted",
-) -> Path:
-    """Create a scatter plot that compares predictions to ground truth."""
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.scatter(y_true, y_pred, alpha=0.6, edgecolor="black")
-    min_val = min(y_true.min(), y_pred.min())
-    max_val = max(y_true.max(), y_pred.max())
-    ax.plot([min_val, max_val], [min_val, max_val], "r--", label="Ideal fit")
-    ax.set_xlabel("Actual")
-    ax.set_ylabel("Predicted")
-    ax.set_title(title)
-    ax.legend()
-    fig.tight_layout()
-    output_path = output_dir / "glm_actual_vs_predicted.png"
-    fig.savefig(output_path, dpi=300)
-    plt.close(fig)
-    return output_path
+def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output: Path) -> None:
+    """Plot predicted versus actual targets and save to *output*."""
+    plt.figure(figsize=(6, 6))
+    plt.scatter(y_true, y_pred, alpha=0.6)
+    max_value = max(np.max(y_true), np.max(y_pred))
+    min_value = min(np.min(y_true), np.min(y_pred))
+    plt.plot([min_value, max_value], [min_value, max_value], "k--", label="Ideal")
+    plt.xlabel("Actual values")
+    plt.ylabel("Predicted values")
+    plt.title("Predicted vs Actual")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output)
+    plt.close()
 
 
-def plot_residuals(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    output_dir: Path,
-) -> Path:
-    """Plot the residual distribution for diagnostic checks."""
-
+def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray, output: Path) -> None:
+    """Plot residuals for diagnostic analysis."""
     residuals = y_true - y_pred
+    plt.figure(figsize=(6, 4))
+    plt.scatter(y_pred, residuals, alpha=0.6)
+    plt.axhline(0, color="k", linestyle="--")
+    plt.xlabel("Predicted values")
+    plt.ylabel("Residuals")
+    plt.title("Residual Plot")
+    plt.tight_layout()
+    plt.savefig(output)
+    plt.close()
+
+
+def plot_coefficients(model: TweedieRegressor, feature_names: Sequence[str], output: Path) -> None:
+    """Visualise the learned GLM coefficients."""
+    plt.figure(figsize=(8, 5))
+    plt.bar(feature_names, model.coef_)
+    plt.xticks(rotation=45, ha="right")
+    plt.ylabel("Coefficient value")
+    plt.title("GLM Coefficients")
+    plt.tight_layout()
+    plt.savefig(output)
+    plt.close()
+
+
+def run_training(
+    csv_path: Path,
+    target_column: str,
+    *,
+    feature_columns: Optional[Iterable[str]],
+    output_dir: Path,
+    config: Optional[GLMConfig] = None,
+) -> GLMTrainingArtifacts:
+    """Convenience wrapper to train the GLM and emit diagnostic plots."""
+    X, y, feature_names = load_dataset(
+        csv_path,
+        target_column,
+        feature_columns=feature_columns,
+    )
+
+    model = GeneralizedLinearRegressionModel(config or GLMConfig())
+    artifacts = model.fit_with_artifacts(X, y, feature_names=feature_names)
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.hist(residuals, bins=30, edgecolor="black", alpha=0.7)
-    ax.axvline(0, color="red", linestyle="--", linewidth=1.5)
-    ax.set_xlabel("Residual")
-    ax.set_ylabel("Frequency")
-    ax.set_title("GLM residual distribution")
-    fig.tight_layout()
-    output_path = output_dir / "glm_residuals.png"
-    fig.savefig(output_path, dpi=300)
-    plt.close(fig)
-    return output_path
+    plot_predictions(artifacts.y_valid, artifacts.predictions, output_dir / "pred_vs_actual.png")
+    plot_residuals(artifacts.y_valid, artifacts.predictions, output_dir / "residuals.png")
+    if model.model is not None:
+        plot_coefficients(model.model, artifacts.feature_names, output_dir / "coefficients.png")
+
+    return artifacts
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Create the CLI argument parser."""
-
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Execute the GLM regression workflow from the command line."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("csv_path", type=Path, help="Path to the training CSV file.")
-    parser.add_argument("target", help="Name of the target column in the CSV file.")
+    parser.add_argument("csv", type=Path, help="Path to the training dataset (CSV)")
+    parser.add_argument("target", help="Name of the target column")
     parser.add_argument(
         "--features",
         nargs="*",
-        help="Optional list of feature columns to use. Defaults to all numeric columns.",
-    )
-    parser.add_argument(
-        "--no-dropna",
-        action="store_true",
-        help="Keep rows with missing target values instead of dropping them.",
-    )
-    parser.add_argument(
-        "--test-size",
-        type=float,
-        default=GLMConfig.test_size,
-        help="Fraction of the dataset to use for validation (default: 0.2).",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=GLMConfig.random_state,
-        help="Random seed used for train/validation splitting.",
+        default=None,
+        help="Optional list of feature column names. Defaults to all numeric columns.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("artifacts"),
-        help="Directory for saving evaluation plots (default: artifacts).",
+        default=Path("reports/glm"),
+        help="Directory to store generated plots.",
     )
-    parser.add_argument(
-        "--power",
-        type=float,
-        default=GLMConfig.power,
-        help="Tweedie power parameter (default: 1.5).",
-    )
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        default=GLMConfig.alpha,
-        help="Regularisation strength for the GLM (default: 0.0).",
-    )
+    parser.add_argument("--test-size", type=float, default=0.2, help="Hold-out fraction for validation")
+    parser.add_argument("--power", type=float, default=1.5, help="Tweedie power parameter")
+    parser.add_argument("--alpha", type=float, default=0.0, help="Overall regularisation strength")
     parser.add_argument(
         "--l1-ratio",
         type=float,
-        default=GLMConfig.l1_ratio,
-        help="Elastic-net mixing parameter when alpha > 0 (default: None).",
+        default=None,
+        help="Elastic-net mixing parameter (None for Ridge-style penalty)",
     )
-    parser.add_argument(
-        "--max-iter",
-        type=int,
-        default=GLMConfig.max_iter,
-        help="Maximum number of iterations for fitting (default: 1000).",
-    )
-    return parser
+    parser.add_argument("--max-iter", type=int, default=1000, help="Maximum optimiser iterations")
 
-
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Entry point for the command line interface."""
-
-    parser = build_parser()
     args = parser.parse_args(argv)
 
     config = GLMConfig(
         test_size=args.test_size,
-        random_state=args.random_state,
         power=args.power,
         alpha=args.alpha,
         l1_ratio=args.l1_ratio,
         max_iter=args.max_iter,
     )
-    features, target, _feature_names = load_dataset(
-        args.csv_path,
+
+    artifacts = run_training(
+        args.csv,
         args.target,
         feature_columns=args.features,
-        dropna=not args.no_dropna,
+        output_dir=args.output_dir,
+        config=config,
     )
 
-    workflow = GLMWorkflow(config=config)
-    y_valid, y_pred = workflow.fit(features, target)
-    metrics = regression_metrics(y_valid, y_pred)
-
     print("Validation metrics:")
-    for name, value in metrics.items():
-        print(f"  {name}: {value:.4f}")
-
-    output_dir = args.output_dir
-    actual_plot = plot_predictions(y_valid, y_pred, output_dir)
-    residual_plot = plot_residuals(y_valid, y_pred, output_dir)
-
-    print(f"Saved actual vs predicted plot to: {actual_plot}")
-    print(f"Saved residual plot to: {residual_plot}")
+    for name, value in artifacts.metrics.items():
+        print(f"  {name.upper():<4}: {value:.4f}")
 
 
 if __name__ == "__main__":
