@@ -1,4 +1,4 @@
-"""XGBoost regression utilities for house-price modelling."""
+"""XGBoost regression utilities aligned with the neural-network pipeline."""
 
 from __future__ import annotations
 
@@ -6,16 +6,19 @@ import argparse
 import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-from sklearn.datasets import load_diabetes
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
+
+from data_preprocessor import DataPreprocessor
+
+
+DEFAULT_DATASET = Path(__file__).with_name("sub_sample.csv")
 
 
 @dataclass
@@ -82,6 +85,16 @@ class XGBoostRegressorModel:
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_valid_scaled = self.scaler.transform(X_valid)
 
+        print(
+            "Training split details:"  # user requested dimension info
+        )
+        print(
+            f"  Train rows: {X_train.shape[0]} | Validation rows: {X_valid.shape[0]} | Features: {X_train.shape[1]}"
+        )
+        print(
+            f"  Target mean (train): {np.mean(y_train):.2f} | Target mean (valid): {np.mean(y_valid):.2f}"
+        )
+
         model = xgb.XGBRegressor(**self.config.to_model_kwargs())
 
         fit_kwargs: Dict[str, Any] = {
@@ -118,36 +131,6 @@ class XGBoostRegressorModel:
         mae = float(mean_absolute_error(y_true, y_pred))
         r2 = float(r2_score(y_true, y_pred))
         return {"rmse": rmse, "mae": mae, "r2": r2}
-
-
-def load_dataset(
-    csv_path: Path,
-    target_column: str,
-    *,
-    feature_columns: Optional[Iterable[str]] = None,
-    dropna: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, Sequence[str]]:
-    """Load a CSV dataset and return feature/target arrays plus feature names."""
-    dataframe = pd.read_csv(csv_path)
-    if dropna:
-        dataframe = dataframe.dropna(subset=[target_column])
-
-    if feature_columns is None:
-        feature_columns = [
-            column
-            for column in dataframe.columns
-            if column != target_column
-            and np.issubdtype(dataframe[column].dtype, np.number)
-        ]
-    else:
-        feature_columns = list(feature_columns)
-
-    if not feature_columns:
-        raise ValueError("No numeric feature columns were provided for training.")
-
-    X = dataframe[feature_columns].to_numpy(dtype=np.float64)
-    y = dataframe[target_column].to_numpy(dtype=np.float64)
-    return X, y, feature_columns
 
 
 def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output: Optional[Path]) -> None:
@@ -190,28 +173,19 @@ def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray, output: Optional[Path
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train an XGBoost regressor from a CSV file or a sample dataset.")
+        description="Train an XGBoost regressor on the house-price dataset.")
     parser.add_argument(
-        "data",
-        nargs="?",
+        "--data",
         type=Path,
-        default=None,
+        default=DEFAULT_DATASET,
         help=(
-            "Optional path to a CSV dataset. If omitted, a sample diabetes dataset from "
-            "scikit-learn is used."
+            "Path to the training CSV. Defaults to 'sub_sample.csv' located alongside this script."
         ),
     )
     parser.add_argument(
-        "target",
-        nargs="?",
-        default=None,
-        help="Name of the target column in the dataset (required when providing a CSV path).",
-    )
-    parser.add_argument(
-        "--features",
-        nargs="*",
-        default=None,
-        help="Optional explicit list of feature columns. Defaults to numeric columns.",
+        "--target",
+        default="PRICE",
+        help="Target column to model (case-insensitive). Use 'PRICE' or 'LOG_PPSQFT'.",
     )
     parser.add_argument(
         "--test-size",
@@ -238,31 +212,26 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
 
-    if args.data is None and args.target is not None:
-        parser.error("The target column cannot be set without providing a dataset path.")
-    if args.data is not None and args.target is None:
-        parser.error("Please supply the target column name when providing a dataset path.")
-
     return args
 
 
-def _load_sample_dataset() -> Tuple[np.ndarray, np.ndarray, Sequence[str], str]:
-    """Return the diabetes regression dataset bundled with scikit-learn."""
+def _prepare_dataset(data_path: Path, target: str) -> Tuple[np.ndarray, np.ndarray, Sequence[str]]:
+    """Load and preprocess the house-price dataset using the shared pipeline."""
 
-    dataset = load_diabetes()
-    feature_columns = list(dataset.feature_names)
+    preprocessor = DataPreprocessor(dataset_path=data_path)
+    raw_df = preprocessor.load_data()
+    print(f"Columns available: {list(raw_df.columns)}")
 
-    target_names_attr = getattr(dataset, "target_names", None)
-    if isinstance(target_names_attr, (list, tuple)) and target_names_attr:
-        target_name = str(target_names_attr[0])
-    elif isinstance(target_names_attr, str):
-        target_name = target_names_attr
-    else:
-        target_name = "target"
+    clean_df = preprocessor.clean_and_engineer(raw_df, one_hot=False)
+    print(f"Cleaned data shape: {clean_df.shape}")
 
-    X = dataset.data.astype(np.float64)
-    y = dataset.target.astype(np.float64)
-    return X, y, feature_columns, target_name
+    X, y, feature_names = preprocessor.prepare_features(clean_df, target=target)
+    print(f"Feature matrix shape: {X.shape} | Target shape: {y.shape}")
+    print(f"Features used ({len(feature_names)}):")
+    for name in feature_names:
+        print(f"  - {name}")
+
+    return X, y, feature_names
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -270,28 +239,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     config = XGBoostConfig(test_size=args.test_size, random_state=args.random_state)
     model = XGBoostRegressorModel(config)
 
-    if args.data is None:
-        print("No dataset provided. Using the sample diabetes dataset bundled with scikit-learn.")
-        X, y, feature_names, target_name = _load_sample_dataset()
-    else:
-        X, y, feature_names = load_dataset(
-            args.data,
-            args.target,
-            feature_columns=args.features,
+    data_path = args.data
+    if not data_path.exists():
+        raise FileNotFoundError(
+            f"Dataset not found at {data_path}. Please supply the correct --data path."
         )
-        target_name = args.target
+
+    X, y, feature_names = _prepare_dataset(data_path, args.target)
 
     _, metrics = model.fit(X, y)
 
     print("Validation metrics:")
     for name, value in metrics.items():
         print(f"  {name}: {value:.4f}")
-
-    if args.data is None:
-        print(
-            "Trained against the sample dataset with target column "
-            f"'{target_name}' and {len(feature_names)} features: {', '.join(feature_names)}"
-        )
 
     if args.output_dir is not None:
         args.output_dir.mkdir(parents=True, exist_ok=True)
