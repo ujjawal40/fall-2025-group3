@@ -1,18 +1,11 @@
-"""Command line entry-point and helpers for the XGBoost regression workflow.
-
-The module keeps the original :class:`XGBoostRegressorModel` API that existed
-before the CLI refactor so downstream notebooks or scripts can continue to
-import it.  A thin ``main`` function now wraps the workflow so developers can
-run the model end-to-end from the terminal while still getting useful plots and
-metric summaries for debugging merge conflicts.
-"""
+"""XGBoost regression utilities for house-price modelling."""
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,7 +32,7 @@ class XGBoostConfig:
     early_stopping_rounds: int = 30
     eval_metric: str = "rmse"
 
-    def to_model_kwargs(self) -> Dict[str, Any]:
+    def to_model_kwargs(self) -> Dict[str, object]:
         """Return keyword arguments for :class:`xgboost.XGBRegressor`."""
         return {
             "n_estimators": self.n_estimators,
@@ -53,17 +46,6 @@ class XGBoostConfig:
             "objective": "reg:squarederror",
             "tree_method": "hist",
         }
-
-
-@dataclass
-class TrainingArtifacts:
-    """Return value from :func:`run_training` for downstream analysis."""
-
-    metrics: Dict[str, float]
-    y_valid: np.ndarray
-    predictions: np.ndarray
-    evals_result: Dict[str, Dict[str, Sequence[float]]]
-    feature_names: Sequence[str]
 
 
 @dataclass
@@ -100,7 +82,7 @@ class XGBoostRegressorModel:
         model.fit(
             X_train_scaled,
             y_train,
-            eval_set=[(X_train_scaled, y_train), (X_valid_scaled, y_valid)],
+            eval_set=[(X_valid_scaled, y_valid)],
             eval_metric=self.config.eval_metric,
             verbose=False,
             early_stopping_rounds=self.config.early_stopping_rounds,
@@ -112,62 +94,12 @@ class XGBoostRegressorModel:
         metrics = self._compute_metrics(y_valid, predictions)
         return model, metrics
 
-    def fit_with_artifacts(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        *,
-        feature_names: Sequence[str],
-    ) -> TrainingArtifacts:
-        """Fit the model and return evaluation metrics plus plotting artefacts."""
-        model, metrics, y_valid, predictions, evals_result = self._fit_internal(X, y)
-        return TrainingArtifacts(
-            metrics=metrics,
-            y_valid=y_valid,
-            predictions=predictions,
-            evals_result=evals_result,
-            feature_names=feature_names,
-        )
-
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Generate predictions using the fitted model."""
         if self.model is None or self.scaler is None:
             raise RuntimeError("Model has not been fitted yet.")
         transformed = self.scaler.transform(X)
         return self.model.predict(transformed)
-
-    def _fit_internal(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-    ) -> Tuple[xgb.XGBRegressor, Dict[str, float], np.ndarray, np.ndarray, Dict[str, Dict[str, Sequence[float]]]]:
-        """Shared implementation between :meth:`fit` and :meth:`fit_with_artifacts`."""
-        X_train, X_valid, y_train, y_valid = train_test_split(
-            X,
-            y,
-            test_size=self.config.test_size,
-            random_state=self.config.random_state,
-        )
-
-        self.scaler = StandardScaler()
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_valid_scaled = self.scaler.transform(X_valid)
-
-        model = xgb.XGBRegressor(**self.config.to_model_kwargs())
-        model.fit(
-            X_train_scaled,
-            y_train,
-            eval_set=[(X_train_scaled, y_train), (X_valid_scaled, y_valid)],
-            eval_metric=self.config.eval_metric,
-            verbose=False,
-            early_stopping_rounds=self.config.early_stopping_rounds,
-        )
-
-        self.model = model
-
-        predictions = model.predict(X_valid_scaled)
-        metrics = self._compute_metrics(y_valid, predictions)
-        return model, metrics, y_valid, predictions, model.evals_result()
 
     @staticmethod
     def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
@@ -208,176 +140,116 @@ def load_dataset(
     return X, y, feature_columns
 
 
-def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output: Path) -> None:
-    """Plot predicted versus actual targets and save to *output*."""
-    plt.figure(figsize=(6, 6))
-    plt.scatter(y_true, y_pred, alpha=0.6)
+def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output: Optional[Path]) -> None:
+    """Plot predicted versus actual targets and save to *output* if provided."""
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(y_true, y_pred, alpha=0.6)
     max_value = max(np.max(y_true), np.max(y_pred))
     min_value = min(np.min(y_true), np.min(y_pred))
-    plt.plot([min_value, max_value], [min_value, max_value], "k--", label="Ideal")
-    plt.xlabel("Actual values")
-    plt.ylabel("Predicted values")
-    plt.title("Predicted vs Actual")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output)
-    plt.close()
+    ax.plot([min_value, max_value], [min_value, max_value], "k--", label="Ideal")
+    ax.set_xlabel("Actual values")
+    ax.set_ylabel("Predicted values")
+    ax.set_title("Predicted vs Actual")
+    ax.legend()
+    fig.tight_layout()
+
+    if output is None:
+        plt.show()
+    else:
+        fig.savefig(output)
+        plt.close(fig)
 
 
-def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray, output: Path) -> None:
+def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray, output: Optional[Path]) -> None:
     """Plot residuals for diagnostic analysis."""
     residuals = y_true - y_pred
-    plt.figure(figsize=(6, 4))
-    plt.scatter(y_pred, residuals, alpha=0.6)
-    plt.axhline(0, color="k", linestyle="--")
-    plt.xlabel("Predicted values")
-    plt.ylabel("Residuals")
-    plt.title("Residual Plot")
-    plt.tight_layout()
-    plt.savefig(output)
-    plt.close()
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.scatter(y_pred, residuals, alpha=0.6)
+    ax.axhline(0.0, color="k", linestyle="--")
+    ax.set_xlabel("Predicted values")
+    ax.set_ylabel("Residuals")
+    ax.set_title("Residual Plot")
+    fig.tight_layout()
+
+    if output is None:
+        plt.show()
+    else:
+        fig.savefig(output)
+        plt.close(fig)
 
 
-def plot_learning_curve(
-    evals_result: Dict[str, Dict[str, Sequence[float]]],
-    output: Path,
-) -> None:
-    """Plot the training and validation metric history."""
-    plt.figure(figsize=(6, 4))
-    for dataset_name, metric_history in evals_result.items():
-        for metric_name, values in metric_history.items():
-            label = f"{dataset_name} - {metric_name}"
-            plt.plot(values, label=label)
-    plt.xlabel("Iteration")
-    plt.ylabel("Metric value")
-    plt.title("Evaluation history")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output)
-    plt.close()
-
-
-def plot_feature_importance(
-    model: xgb.XGBRegressor,
-    feature_names: Sequence[str],
-    output: Path,
-) -> None:
-    """Plot feature importances reported by the trained model."""
-    importance = model.feature_importances_
-    sorted_indices = np.argsort(importance)[::-1]
-    plt.figure(figsize=(8, 5))
-    plt.bar(
-        [feature_names[idx] for idx in sorted_indices],
-        importance[sorted_indices],
-    )
-    plt.xticks(rotation=45, ha="right")
-    plt.ylabel("Importance score")
-    plt.title("XGBoost Feature Importance")
-    plt.tight_layout()
-    plt.savefig(output)
-    plt.close()
-
-
-def run_training(
-    csv_path: Path,
-    target_column: str,
-    *,
-    feature_columns: Optional[Iterable[str]],
-    output_dir: Path,
-    config: Optional[XGBoostConfig] = None,
-) -> TrainingArtifacts:
-    """Convenience wrapper used by :func:`main` and tests."""
-    X, y, feature_names = load_dataset(
-        csv_path,
-        target_column,
-        feature_columns=feature_columns,
-    )
-
-    model = XGBoostRegressorModel(config or XGBoostConfig())
-    artifacts = model.fit_with_artifacts(X, y, feature_names=feature_names)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    plot_predictions(artifacts.y_valid, artifacts.predictions, output_dir / "pred_vs_actual.png")
-    plot_residuals(artifacts.y_valid, artifacts.predictions, output_dir / "residuals.png")
-    plot_learning_curve(artifacts.evals_result, output_dir / "evaluation_history.png")
-    plot_feature_importance(model.model, artifacts.feature_names, output_dir / "feature_importance.png")
-
-    return artifacts
-
-
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Run the XGBoost regression workflow from the command line."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("csv", type=Path, help="Path to the training dataset (CSV)")
-    parser.add_argument("target", help="Name of the target column")
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train an XGBoost regressor from a CSV file.")
+    parser.add_argument("data", type=Path, help="Path to the CSV dataset")
+    parser.add_argument("target", help="Name of the target column in the dataset")
     parser.add_argument(
         "--features",
         nargs="*",
         default=None,
-        help="Optional list of feature column names. Defaults to all numeric columns.",
+        help="Optional explicit list of feature columns. Defaults to numeric columns.",
+    )
+    parser.add_argument(
+        "--test-size",
+        type=float,
+        default=XGBoostConfig.test_size,
+        help="Fraction of the dataset to reserve for validation.",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=XGBoostConfig.random_state,
+        help="Random seed used for train/validation splitting.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("reports/xgboost"),
-        help="Directory to store generated plots.",
-    )
-    parser.add_argument("--test-size", type=float, default=0.2, help="Hold-out fraction for validation")
-    parser.add_argument("--learning-rate", type=float, default=0.05, help="Boosting learning rate")
-    parser.add_argument("--n-estimators", type=int, default=500, help="Number of boosting rounds")
-    parser.add_argument("--max-depth", type=int, default=6, help="Tree depth")
-    parser.add_argument(
-        "--subsample",
-        type=float,
-        default=0.8,
-        help="Subsample ratio for the training instances",
+        default=None,
+        help="Optional directory to store generated plots.",
     )
     parser.add_argument(
-        "--colsample-bytree",
-        type=float,
-        default=0.8,
-        help="Subsample ratio for columns when constructing trees",
+        "--no-show",
+        action="store_true",
+        help="Disable interactive plot display (useful for CI environments).",
     )
-    parser.add_argument("--reg-alpha", type=float, default=0.0, help="L1 regularisation term")
-    parser.add_argument("--reg-lambda", type=float, default=1.0, help="L2 regularisation term")
-    parser.add_argument(
-        "--early-stopping-rounds",
-        type=int,
-        default=30,
-        help="Rounds of no improvement before early stopping",
-    )
-    parser.add_argument(
-        "--eval-metric",
-        default="rmse",
-        help="Evaluation metric reported by XGBoost during training",
-    )
+    return parser.parse_args(argv)
 
-    args = parser.parse_args(argv)
 
-    config = XGBoostConfig(
-        test_size=args.test_size,
-        learning_rate=args.learning_rate,
-        n_estimators=args.n_estimators,
-        max_depth=args.max_depth,
-        subsample=args.subsample,
-        colsample_bytree=args.colsample_bytree,
-        reg_alpha=args.reg_alpha,
-        reg_lambda=args.reg_lambda,
-        early_stopping_rounds=args.early_stopping_rounds,
-        eval_metric=args.eval_metric,
-    )
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args = _parse_args(argv)
+    config = XGBoostConfig(test_size=args.test_size, random_state=args.random_state)
+    model = XGBoostRegressorModel(config)
 
-    artifacts = run_training(
-        args.csv,
+    X, y, _ = load_dataset(
+        args.data,
         args.target,
         feature_columns=args.features,
-        output_dir=args.output_dir,
-        config=config,
     )
 
+    _, metrics = model.fit(X, y)
+
     print("Validation metrics:")
-    for name, value in artifacts.metrics.items():
-        print(f"  {name.upper():<4}: {value:.4f}")
+    for name, value in metrics.items():
+        print(f"  {name}: {value:.4f}")
+
+    if args.output_dir is not None:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        pred_path = args.output_dir / "xgboost_pred_vs_actual.png"
+        resid_path = args.output_dir / "xgboost_residuals.png"
+    else:
+        pred_path = None
+        resid_path = None
+
+    if args.no_show:
+        plt.ioff()
+
+    y_pred_all = model.predict(X)
+    plot_predictions(y, y_pred_all, pred_path)
+    plot_residuals(y, y_pred_all, resid_path)
+
+    if pred_path is not None:
+        print(f"Saved prediction plot to {pred_path}")
+    if resid_path is not None:
+        print(f"Saved residual plot to {resid_path}")
 
 
 if __name__ == "__main__":
