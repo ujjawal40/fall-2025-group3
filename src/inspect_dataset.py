@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from component.data_inspector import DataInspector
+from data_inspector import DataInspector
 
 
 if __name__ == "__main__":
