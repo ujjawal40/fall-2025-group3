@@ -6,6 +6,7 @@ import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
