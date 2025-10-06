@@ -6,7 +6,6 @@ import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
-from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -47,6 +46,7 @@ class XGBoostConfig:
             "random_state": self.random_state,
             "objective": "reg:squarederror",
             "tree_method": "hist",
+            "eval_metric": self.eval_metric,
         }
         return params
 
@@ -86,7 +86,6 @@ class XGBoostRegressorModel:
             X_train_scaled,
             y_train,
             eval_set=[(X_valid_scaled, y_valid)],
-            eval_metric=self.config.eval_metric,
             verbose=False,
             early_stopping_rounds=self.config.early_stopping_rounds,
         )
