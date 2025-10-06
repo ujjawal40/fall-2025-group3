@@ -5,16 +5,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.datasets import load_diabetes
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
-
-import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -37,10 +34,9 @@ class XGBoostConfig:
     early_stopping_rounds: int = 30
     eval_metric: str = "rmse"
 
-    def to_model_kwargs(self) -> Dict[str, object]:
     def to_model_kwargs(self) -> Dict[str, Any]:
         """Return keyword arguments for :class:`xgboost.XGBRegressor`."""
-        return {
+        params: Dict[str, Any] = {
             "n_estimators": self.n_estimators,
             "learning_rate": self.learning_rate,
             "max_depth": self.max_depth,
@@ -52,6 +48,7 @@ class XGBoostConfig:
             "objective": "reg:squarederror",
             "tree_method": "hist",
         }
+        return params
 
 
 @dataclass
