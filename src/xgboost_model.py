@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
@@ -82,13 +83,20 @@ class XGBoostRegressorModel:
         X_valid_scaled = self.scaler.transform(X_valid)
 
         model = xgb.XGBRegressor(**self.config.to_model_kwargs())
-        model.fit(
-            X_train_scaled,
-            y_train,
-            eval_set=[(X_valid_scaled, y_valid)],
-            verbose=False,
-            early_stopping_rounds=self.config.early_stopping_rounds,
-        )
+
+        fit_kwargs: Dict[str, Any] = {
+            "eval_set": [(X_valid_scaled, y_valid)],
+            "verbose": False,
+        }
+
+        signature = inspect.signature(model.fit)
+        if (
+            self.config.early_stopping_rounds
+            and "early_stopping_rounds" in signature.parameters
+        ):
+            fit_kwargs["early_stopping_rounds"] = self.config.early_stopping_rounds
+
+        model.fit(X_train_scaled, y_train, **fit_kwargs)
 
         self.model = model
 
