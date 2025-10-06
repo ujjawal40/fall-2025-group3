@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Iterable, Optional, Sequence, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from sklearn.datasets import load_diabetes
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
@@ -28,6 +37,7 @@ class XGBoostConfig:
     early_stopping_rounds: int = 30
     eval_metric: str = "rmse"
 
+    def to_model_kwargs(self) -> Dict[str, object]:
     def to_model_kwargs(self) -> Dict[str, Any]:
         """Return keyword arguments for :class:`xgboost.XGBRegressor`."""
         return {
@@ -104,3 +114,201 @@ class XGBoostRegressorModel:
         mae = float(mean_absolute_error(y_true, y_pred))
         r2 = float(r2_score(y_true, y_pred))
         return {"rmse": rmse, "mae": mae, "r2": r2}
+
+
+def load_dataset(
+    csv_path: Path,
+    target_column: str,
+    *,
+    feature_columns: Optional[Iterable[str]] = None,
+    dropna: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, Sequence[str]]:
+    """Load a CSV dataset and return feature/target arrays plus feature names."""
+    dataframe = pd.read_csv(csv_path)
+    if dropna:
+        dataframe = dataframe.dropna(subset=[target_column])
+
+    if feature_columns is None:
+        feature_columns = [
+            column
+            for column in dataframe.columns
+            if column != target_column
+            and np.issubdtype(dataframe[column].dtype, np.number)
+        ]
+    else:
+        feature_columns = list(feature_columns)
+
+    if not feature_columns:
+        raise ValueError("No numeric feature columns were provided for training.")
+
+    X = dataframe[feature_columns].to_numpy(dtype=np.float64)
+    y = dataframe[target_column].to_numpy(dtype=np.float64)
+    return X, y, feature_columns
+
+
+def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output: Optional[Path]) -> None:
+    """Plot predicted versus actual targets and save to *output* if provided."""
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(y_true, y_pred, alpha=0.6)
+    max_value = max(np.max(y_true), np.max(y_pred))
+    min_value = min(np.min(y_true), np.min(y_pred))
+    ax.plot([min_value, max_value], [min_value, max_value], "k--", label="Ideal")
+    ax.set_xlabel("Actual values")
+    ax.set_ylabel("Predicted values")
+    ax.set_title("Predicted vs Actual")
+    ax.legend()
+    fig.tight_layout()
+
+    if output is None:
+        plt.show()
+    else:
+        fig.savefig(output)
+        plt.close(fig)
+
+
+def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray, output: Optional[Path]) -> None:
+    """Plot residuals for diagnostic analysis."""
+    residuals = y_true - y_pred
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.scatter(y_pred, residuals, alpha=0.6)
+    ax.axhline(0.0, color="k", linestyle="--")
+    ax.set_xlabel("Predicted values")
+    ax.set_ylabel("Residuals")
+    ax.set_title("Residual Plot")
+    fig.tight_layout()
+
+    if output is None:
+        plt.show()
+    else:
+        fig.savefig(output)
+        plt.close(fig)
+
+
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train an XGBoost regressor from a CSV file or a sample dataset.")
+    parser.add_argument(
+        "data",
+        nargs="?",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to a CSV dataset. If omitted, a sample diabetes dataset from "
+            "scikit-learn is used."
+        ),
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Name of the target column in the dataset (required when providing a CSV path).",
+    )
+    parser.add_argument(
+        "--features",
+        nargs="*",
+        default=None,
+        help="Optional explicit list of feature columns. Defaults to numeric columns.",
+    )
+    parser.add_argument(
+        "--test-size",
+        type=float,
+        default=XGBoostConfig.test_size,
+        help="Fraction of the dataset to reserve for validation.",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=XGBoostConfig.random_state,
+        help="Random seed used for train/validation splitting.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Optional directory to store generated plots.",
+    )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Disable interactive plot display (useful for CI environments).",
+    )
+    args = parser.parse_args(argv)
+
+    if args.data is None and args.target is not None:
+        parser.error("The target column cannot be set without providing a dataset path.")
+    if args.data is not None and args.target is None:
+        parser.error("Please supply the target column name when providing a dataset path.")
+
+    return args
+
+
+def _load_sample_dataset() -> Tuple[np.ndarray, np.ndarray, Sequence[str], str]:
+    """Return the diabetes regression dataset bundled with scikit-learn."""
+
+    dataset = load_diabetes()
+    feature_columns = list(dataset.feature_names)
+
+    target_names_attr = getattr(dataset, "target_names", None)
+    if isinstance(target_names_attr, (list, tuple)) and target_names_attr:
+        target_name = str(target_names_attr[0])
+    elif isinstance(target_names_attr, str):
+        target_name = target_names_attr
+    else:
+        target_name = "target"
+
+    X = dataset.data.astype(np.float64)
+    y = dataset.target.astype(np.float64)
+    return X, y, feature_columns, target_name
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args = _parse_args(argv)
+    config = XGBoostConfig(test_size=args.test_size, random_state=args.random_state)
+    model = XGBoostRegressorModel(config)
+
+    if args.data is None:
+        print("No dataset provided. Using the sample diabetes dataset bundled with scikit-learn.")
+        X, y, feature_names, target_name = _load_sample_dataset()
+    else:
+        X, y, feature_names = load_dataset(
+            args.data,
+            args.target,
+            feature_columns=args.features,
+        )
+        target_name = args.target
+
+    _, metrics = model.fit(X, y)
+
+    print("Validation metrics:")
+    for name, value in metrics.items():
+        print(f"  {name}: {value:.4f}")
+
+    if args.data is None:
+        print(
+            "Trained against the sample dataset with target column "
+            f"'{target_name}' and {len(feature_names)} features: {', '.join(feature_names)}"
+        )
+
+    if args.output_dir is not None:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        pred_path = args.output_dir / "xgboost_pred_vs_actual.png"
+        resid_path = args.output_dir / "xgboost_residuals.png"
+    else:
+        pred_path = None
+        resid_path = None
+
+    if args.no_show:
+        plt.ioff()
+
+    y_pred_all = model.predict(X)
+    plot_predictions(y, y_pred_all, pred_path)
+    plot_residuals(y, y_pred_all, resid_path)
+
+    if pred_path is not None:
+        print(f"Saved prediction plot to {pred_path}")
+    if resid_path is not None:
+        print(f"Saved residual plot to {resid_path}")
+
+
+if __name__ == "__main__":
+    main()
