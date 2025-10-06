@@ -10,6 +10,7 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.datasets import load_diabetes
 from sklearn.linear_model import TweedieRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
@@ -144,9 +145,24 @@ def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray, output: Optional[Path
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a GLM regressor from a CSV file.")
-    parser.add_argument("data", type=Path, help="Path to the CSV dataset")
-    parser.add_argument("target", help="Name of the target column in the dataset")
+    parser = argparse.ArgumentParser(
+        description="Train a GLM regressor from a CSV file or a sample dataset.")
+    parser.add_argument(
+        "data",
+        nargs="?",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to a CSV dataset. If omitted, a sample diabetes dataset from "
+            "scikit-learn is used."
+        ),
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Name of the target column in the dataset (required when providing a CSV path).",
+    )
     parser.add_argument(
         "--features",
         nargs="*",
@@ -200,7 +216,33 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Disable interactive plot display (useful for CI environments).",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    if args.data is None and args.target is not None:
+        parser.error("The target column cannot be set without providing a dataset path.")
+    if args.data is not None and args.target is None:
+        parser.error("Please supply the target column name when providing a dataset path.")
+
+    return args
+
+
+def _load_sample_dataset() -> Tuple[np.ndarray, np.ndarray, Sequence[str], str]:
+    """Return the diabetes regression dataset bundled with scikit-learn."""
+
+    dataset = load_diabetes()
+    feature_columns = list(dataset.feature_names)
+
+    target_names_attr = getattr(dataset, "target_names", None)
+    if isinstance(target_names_attr, (list, tuple)) and target_names_attr:
+        target_name = str(target_names_attr[0])
+    elif isinstance(target_names_attr, str):
+        target_name = target_names_attr
+    else:
+        target_name = "target"
+
+    X = dataset.data.astype(np.float64)
+    y = dataset.target.astype(np.float64)
+    return X, y, feature_columns, target_name
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -215,17 +257,28 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     model = GeneralizedLinearRegressionModel(config)
 
-    X, y, _ = load_dataset(
-        args.data,
-        args.target,
-        feature_columns=args.features,
-    )
+    if args.data is None:
+        print("No dataset provided. Using the sample diabetes dataset bundled with scikit-learn.")
+        X, y, feature_names, target_name = _load_sample_dataset()
+    else:
+        X, y, feature_names = load_dataset(
+            args.data,
+            args.target,
+            feature_columns=args.features,
+        )
+        target_name = args.target
 
     _, metrics = model.fit(X, y)
 
     print("Validation metrics:")
     for name, value in metrics.items():
         print(f"  {name}: {value:.4f}")
+
+    if args.data is None:
+        print(
+            "Trained against the sample dataset with target column "
+            f"'{target_name}' and {len(feature_names)} features: {', '.join(feature_names)}"
+        )
 
     if args.output_dir is not None:
         args.output_dir.mkdir(parents=True, exist_ok=True)
