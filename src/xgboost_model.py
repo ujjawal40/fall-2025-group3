@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.datasets import load_diabetes
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -34,6 +38,7 @@ class XGBoostConfig:
     eval_metric: str = "rmse"
 
     def to_model_kwargs(self) -> Dict[str, object]:
+    def to_model_kwargs(self) -> Dict[str, Any]:
         """Return keyword arguments for :class:`xgboost.XGBRegressor`."""
         return {
             "n_estimators": self.n_estimators,
