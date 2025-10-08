@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,8 +39,21 @@ class GeneralizedLinearRegressionModel:
     config: GLMConfig = field(default_factory=GLMConfig)
     scaler: Optional[StandardScaler] = field(default=None, init=False)
     model: Optional[TweedieRegressor] = field(default=None, init=False)
+    target_transform: Optional[Callable[[np.ndarray], np.ndarray]] = field(
+        default=None, init=False, repr=False
+    )
+    target_inverse: Optional[Callable[[np.ndarray], np.ndarray]] = field(
+        default=None, init=False, repr=False
+    )
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> Tuple[TweedieRegressor, Dict[str, float]]:
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        *,
+        target_transform: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        target_inverse: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    ) -> Tuple[TweedieRegressor, Dict[str, float]]:
         """Fit the GLM to the provided dataset and return validation metrics."""
         X_train, X_valid, y_train, y_valid = train_test_split(
             X,
@@ -52,6 +65,16 @@ class GeneralizedLinearRegressionModel:
         self.scaler = StandardScaler(with_mean=True, with_std=True)
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_valid_scaled = self.scaler.transform(X_valid)
+
+        if target_transform is not None:
+            y_train_model = target_transform(y_train)
+            y_valid_model = target_transform(y_valid)
+        else:
+            y_train_model = y_train
+            y_valid_model = y_valid
+
+        self.target_transform = target_transform
+        self.target_inverse = target_inverse
 
         print("Training split details:")
         print(
@@ -67,11 +90,30 @@ class GeneralizedLinearRegressionModel:
             l1_ratio=self.config.l1_ratio,
             max_iter=self.config.max_iter,
         )
-        model.fit(X_train_scaled, y_train)
+        model.fit(X_train_scaled, y_train_model)
         self.model = model
 
-        predictions = model.predict(X_valid_scaled)
-        metrics = self._compute_metrics(y_valid, predictions)
+        predictions_model = model.predict(X_valid_scaled)
+
+        y_eval = y_valid_model
+        preds_eval = predictions_model
+
+        if target_inverse is not None:
+            y_eval = target_inverse(y_valid_model)
+            preds_eval = target_inverse(predictions_model)
+
+        metrics = self._compute_metrics(y_eval, preds_eval)
+
+        if target_transform is not None and target_inverse is not None:
+            transformed_metrics = self._compute_metrics(y_valid_model, predictions_model)
+            metrics.update(
+                {
+                    "rmse_transformed": transformed_metrics["rmse"],
+                    "mae_transformed": transformed_metrics["mae"],
+                    "r2_transformed": transformed_metrics["r2"],
+                }
+            )
+
         return model, metrics
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -79,7 +121,10 @@ class GeneralizedLinearRegressionModel:
         if self.model is None or self.scaler is None:
             raise RuntimeError("Model has not been fitted yet.")
         transformed = self.scaler.transform(X)
-        return self.model.predict(transformed)
+        preds = self.model.predict(transformed)
+        if self.target_inverse is not None:
+            return self.target_inverse(preds)
+        return preds
 
     @staticmethod
     def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
@@ -201,7 +246,7 @@ def _prepare_dataset(data_path: Path, target: str) -> Tuple[np.ndarray, np.ndarr
     raw_df = preprocessor.load_data()
     print(f"Columns available: {list(raw_df.columns)}")
 
-    clean_df = preprocessor.clean_and_engineer(raw_df, one_hot=False)
+    clean_df = preprocessor.clean_and_engineer(raw_df, one_hot=True)
     print(f"Cleaned data shape: {clean_df.shape}")
 
     X, y, feature_names = preprocessor.prepare_features(clean_df, target=target)
@@ -233,7 +278,24 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     X, y, feature_names = _prepare_dataset(data_path, args.target)
 
-    _, metrics = model.fit(X, y)
+    target_key = args.target.upper()
+    target_transform: Optional[Callable[[np.ndarray], np.ndarray]]
+    target_inverse: Optional[Callable[[np.ndarray], np.ndarray]]
+
+    if target_key == "PRICE":
+        print("Applying log1p transform to PRICE target for modelling while reporting metrics in dollars.")
+        target_transform = np.log1p
+        target_inverse = np.expm1
+    else:
+        target_transform = None
+        target_inverse = None
+
+    _, metrics = model.fit(
+        X,
+        y,
+        target_transform=target_transform,
+        target_inverse=target_inverse,
+    )
 
     print("Validation metrics:")
     for name, value in metrics.items():
