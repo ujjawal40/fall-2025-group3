@@ -66,6 +66,10 @@ class ModelTrainer:
         X_tr, X_val, y_tr, y_val = train_test_split(
             X, y, test_size=test_size, random_state=random_state
         )
+
+        # Ensure labels match the float32 tensor dtype used for training.
+        y_tr = y_tr.astype(np.float32)
+        y_val = y_val.astype(np.float32)
         
         scaler = StandardScaler()
         X_tr = scaler.fit_transform(X_tr).astype(np.float32)
