@@ -189,7 +189,9 @@ class DataPreprocessor:
                 truly_cat.append(col)
 
         if one_hot and truly_cat:
-            df = pd.get_dummies(df, columns=truly_cat, dummy_na=True, prefix_sep="==")
+            df = pd.get_dummies(
+                df, columns=truly_cat, dummy_na=True, prefix_sep="==", dtype=np.float32
+            )
         else:
             df.drop(columns=truly_cat, inplace=True)
 
@@ -223,7 +225,7 @@ class DataPreprocessor:
             else:
                 features_df[col] = features_df[col].fillna(features_df[col].median())
 
-        features_df = features_df.astype(np.float64)
+        features_df = features_df.astype(np.float32)
         features_df.replace([np.inf, -np.inf, np.nan], 0.0, inplace=True)
 
         target_key = target.upper()

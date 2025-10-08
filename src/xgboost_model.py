@@ -274,6 +274,15 @@ def _prepare_dataset(
     raw_df = preprocessor.load_data()
     print(f"Columns available: {list(raw_df.columns)}")
 
+    if max_rows is not None and max_rows > 0 and len(raw_df) > max_rows:
+        orig_rows = len(raw_df)
+        raw_df = raw_df.sample(n=max_rows, random_state=random_state)
+        raw_df = raw_df.reset_index(drop=True)
+        print(
+            "Subsampled raw dataset before preprocessing "
+            f"to {len(raw_df)} rows out of the original {orig_rows}."
+        )
+
     clean_df = preprocessor.clean_and_engineer(raw_df, one_hot=True)
     print(f"Cleaned data shape: {clean_df.shape}")
 
@@ -282,17 +291,6 @@ def _prepare_dataset(
     print(f"Features used ({len(feature_names)}):")
     for name in feature_names:
         print(f"  - {name}")
-
-    if max_rows is not None and max_rows > 0 and X.shape[0] > max_rows:
-        orig_rows = X.shape[0]
-        rng = np.random.default_rng(random_state)
-        indices = rng.choice(orig_rows, size=max_rows, replace=False)
-        X = X[indices]
-        y = y[indices]
-        print(
-            f"Subsampled dataset for modelling: using {X.shape[0]} of {orig_rows} rows."
-        )
-        print(f"  Sampled rows: {X.shape[0]} | Features: {X.shape[1]}")
 
     return X, y, feature_names
 
