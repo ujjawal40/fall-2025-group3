@@ -200,6 +200,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Random seed used for train/validation splitting.",
     )
     parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=50_000,
+        help="Maximum number of rows to use for training/validation (0 disables).",
+    )
+    parser.add_argument(
         "--power",
         type=float,
         default=GLMConfig.power,
@@ -239,7 +245,13 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
-def _prepare_dataset(data_path: Path, target: str) -> Tuple[np.ndarray, np.ndarray, Sequence[str]]:
+def _prepare_dataset(
+    data_path: Path,
+    target: str,
+    *,
+    max_rows: Optional[int] = None,
+    random_state: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, Sequence[str]]:
     """Load and preprocess the house-price dataset using the shared pipeline."""
 
     preprocessor = DataPreprocessor(dataset_path=data_path)
@@ -254,6 +266,17 @@ def _prepare_dataset(data_path: Path, target: str) -> Tuple[np.ndarray, np.ndarr
     print(f"Features used ({len(feature_names)}):")
     for name in feature_names:
         print(f"  - {name}")
+
+    if max_rows is not None and max_rows > 0 and X.shape[0] > max_rows:
+        orig_rows = X.shape[0]
+        rng = np.random.default_rng(random_state)
+        indices = rng.choice(orig_rows, size=max_rows, replace=False)
+        X = X[indices]
+        y = y[indices]
+        print(
+            f"Subsampled dataset for modelling: using {X.shape[0]} of {orig_rows} rows."
+        )
+        print(f"  Sampled rows: {X.shape[0]} | Features: {X.shape[1]}")
 
     return X, y, feature_names
 
@@ -276,7 +299,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             f"Dataset not found at {data_path}. Please supply the correct --data path."
         )
 
-    X, y, feature_names = _prepare_dataset(data_path, args.target)
+    X, y, feature_names = _prepare_dataset(
+        data_path,
+        args.target,
+        max_rows=args.max_rows,
+        random_state=args.random_state,
+    )
 
     target_key = args.target.upper()
     target_transform: Optional[Callable[[np.ndarray], np.ndarray]]
