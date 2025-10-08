@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from inspect import signature
 from pathlib import Path
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
@@ -18,6 +19,10 @@ from data_preprocessor import DataPreprocessor
 
 
 DEFAULT_DATASET = Path(__file__).with_name("sub_sample.csv")
+
+
+_TWEEDIE_SIGNATURE = signature(TweedieRegressor)
+_SUPPORTS_L1_RATIO = "l1_ratio" in _TWEEDIE_SIGNATURE.parameters
 
 
 @dataclass
@@ -84,12 +89,21 @@ class GeneralizedLinearRegressionModel:
             f"  Target mean (train): {np.mean(y_train):.2f} | Target mean (valid): {np.mean(y_valid):.2f}"
         )
 
-        model = TweedieRegressor(
-            power=self.config.power,
-            alpha=self.config.alpha,
-            l1_ratio=self.config.l1_ratio,
-            max_iter=self.config.max_iter,
-        )
+        model_kwargs = {
+            "power": self.config.power,
+            "alpha": self.config.alpha,
+            "max_iter": self.config.max_iter,
+        }
+        if self.config.l1_ratio is not None:
+            if _SUPPORTS_L1_RATIO:
+                model_kwargs["l1_ratio"] = self.config.l1_ratio
+            else:
+                print(
+                    "Current scikit-learn TweedieRegressor does not accept 'l1_ratio'; "
+                    "ignoring the provided value."
+                )
+
+        model = TweedieRegressor(**model_kwargs)
         model.fit(X_train_scaled, y_train_model)
         self.model = model
 
