@@ -68,14 +68,40 @@ class DataPreprocessor:
     def load_data(self, file_path: str | Path | None = None) -> pd.DataFrame:
         """Load the CSV dataset and report its shape."""
 
-        path = Path(file_path) if file_path is not None else self.dataset_path
-        if path is None:
+        requested = Path(file_path) if file_path is not None else self.dataset_path
+        if requested is None:
             raise ValueError("A dataset path must be provided before loading data.")
 
+        search_roots = []
+        if requested.is_absolute():
+            search_roots.append(requested)
+        else:
+            search_roots.extend(
+                [
+                    requested,
+                    Path.cwd() / requested,
+                    Path(__file__).resolve().parent / requested,
+                ]
+            )
+
+        resolved_path: Path | None = None
+        for candidate in search_roots:
+            if candidate.is_file():
+                resolved_path = candidate
+                break
+
+        if resolved_path is None:
+            raise FileNotFoundError(f"File not found: {requested}")
+
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(resolved_path)
         except FileNotFoundError as exc:  # pragma: no cover - passthrough for CLI UX
-            raise FileNotFoundError(f"File not found: {path}") from exc
+            raise FileNotFoundError(f"File not found: {requested}") from exc
+
+        self.dataset_path = resolved_path
+
+        if resolved_path != requested:
+            print(f"Resolved dataset path to: {resolved_path}")
 
         print(f"Loaded data shape: {df.shape}")
         return df
