@@ -5,6 +5,7 @@ import math
 import time
 from tqdm.auto import tqdm
 from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_absolute_error
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
@@ -162,17 +163,28 @@ class ModelTrainer:
             model.eval()
             with torch.no_grad():
                 final_preds = torch.cat([model(xb.to(self.device)) for xb, _ in val_loader]).cpu().squeeze().numpy()
-            
+
             actual_prices = np.expm1(y_val)
             predicted_prices = np.expm1(final_preds)
             pct_errors = np.abs((actual_prices - predicted_prices) / actual_prices) * 100
-            
+
+            final_rmse_dollars = math.sqrt(mean_squared_error(actual_prices, predicted_prices))
+            final_mae_dollars = mean_absolute_error(actual_prices, predicted_prices)
+            final_rmse_log = math.sqrt(mean_squared_error(y_val, final_preds))
+            final_mae_log = mean_absolute_error(y_val, final_preds)
+
             final_acc_5pct = (pct_errors < 5).mean() * 100
             final_acc_15pct = (pct_errors < 15).mean() * 100
-            
+
             print(f"Final Accuracy Metrics:")
             print(f"  < 5% error: {final_acc_5pct:.2f}%")
             print(f"  < 15% error: {final_acc_15pct:.2f}%")
+            print("Final Error Metrics (log space):")
+            print(f"  RMSE: {final_rmse_log:.4f}")
+            print(f"  MAE: {final_mae_log:.4f}")
+            print("Final Error Metrics (dollar space):")
+            print(f"  RMSE: ${final_rmse_dollars:,.2f}")
+            print(f"  MAE: ${final_mae_dollars:,.2f}")
             print(f"Target (WITHOUT Loc): < 5% = 24.60%, < 15% = 64.54%")
             print(f"Target (WITH Loc): < 5% = 27.43%, < 15% = 70.10%")
             
