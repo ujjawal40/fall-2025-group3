@@ -63,8 +63,8 @@ class GeneralizedLinearRegressionModel:
         )
 
         self.scaler = StandardScaler(with_mean=True, with_std=True)
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_valid_scaled = self.scaler.transform(X_valid)
+        X_train_scaled = self.scaler.fit_transform(X_train).astype(np.float32)
+        X_valid_scaled = self.scaler.transform(X_valid).astype(np.float32)
 
         if target_transform is not None:
             y_train_model = target_transform(y_train)
@@ -120,7 +120,7 @@ class GeneralizedLinearRegressionModel:
         """Generate predictions using the fitted GLM."""
         if self.model is None or self.scaler is None:
             raise RuntimeError("Model has not been fitted yet.")
-        transformed = self.scaler.transform(X)
+        transformed = self.scaler.transform(X).astype(np.float32)
         preds = self.model.predict(transformed)
         if self.target_inverse is not None:
             return self.target_inverse(preds)
@@ -230,6 +230,14 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Maximum iterations for the optimiser.",
     )
     parser.add_argument(
+        "--one-hot",
+        action="store_true",
+        help=(
+            "Enable one-hot encoding of categorical columns. Disable by default to "
+            "keep the feature matrix compact like the neural network pipeline."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -251,6 +259,7 @@ def _prepare_dataset(
     *,
     max_rows: Optional[int] = None,
     random_state: Optional[int] = None,
+    one_hot: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, Sequence[str]]:
     """Load and preprocess the house-price dataset using the shared pipeline."""
 
@@ -267,7 +276,12 @@ def _prepare_dataset(
             f"to {len(raw_df)} rows out of the original {orig_rows}."
         )
 
-    clean_df = preprocessor.clean_and_engineer(raw_df, one_hot=True)
+    if not one_hot:
+        print(
+            "One-hot encoding disabled (default) to mirror the neural network pipeline and "
+            "keep the feature matrix compact."
+        )
+    clean_df = preprocessor.clean_and_engineer(raw_df, one_hot=one_hot)
     print(f"Cleaned data shape: {clean_df.shape}")
 
     X, y, feature_names = preprocessor.prepare_features(clean_df, target=target)
@@ -302,6 +316,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         args.target,
         max_rows=args.max_rows,
         random_state=args.random_state,
+        one_hot=args.one_hot,
     )
 
     target_key = args.target.upper()

@@ -238,7 +238,7 @@ class DataPreprocessor:
                 "Unsupported target specified. Use 'PRICE' or 'LOG_PPSQFT'."
             )
 
-        X = features_df.to_numpy(dtype=np.float64)
+        X = features_df.to_numpy(dtype=np.float32)
         feature_names = features_df.columns.to_numpy()
 
         if not np.isfinite(X).all():

@@ -13,5 +13,8 @@
   out of memory on local machines: `--max-rows 10000` or lower keeps preprocessing and
   histogram boosting within a few gigabytes of RAM. The scripts sample **before** one-hot
   encoding so the feature matrix is reduced accordingly.
+- The GLM runner leaves one-hot encoding disabled by default to mirror the neural
+  network workflow. Pass `--one-hot` if you need categorical dummies and have enough
+  memory; otherwise the compact feature set is safer for dense linear models.
 - Plots are displayed interactively by default. Use `--output-dir results/plots` to save
   the prediction and residual figures to disk (and `--no-show` to skip the GUI pop-up).
