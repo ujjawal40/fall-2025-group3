@@ -9,3 +9,9 @@
 - Both regression runners can operate without arguments by falling back to the diabetes
   regression dataset bundled with `scikit-learn`. Provide a CSV path and target column if
   you want to run against your own data.
+- When working with the 100k-row Zillow export, start with a subsample to avoid running
+  out of memory on local machines: `--max-rows 10000` or lower keeps preprocessing and
+  histogram boosting within a few gigabytes of RAM. The scripts sample **before** one-hot
+  encoding so the feature matrix is reduced accordingly.
+- Plots are displayed interactively by default. Use `--output-dir results/plots` to save
+  the prediction and residual figures to disk (and `--no-show` to skip the GUI pop-up).
