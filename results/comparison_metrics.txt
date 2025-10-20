@@ -37,7 +37,29 @@ Validation metrics (log1p target):
   - mae_transformed: 0.2670
   - r2_transformed: 0.5536
 
+Neural Network (Intrinsic MLP)
+-----------------------------
+Command: python src/neural_network_model.py --data sub_sample.csv --target LOG_PPSQFT --max-rows 100000
+Key adjustments: standardised training targets to float32 tensors to stabilise backpropagation and resumed the baseline architecture.
+Training summary:
+  - Epochs: 200 | Batch size: 256 | Optimiser: Adam (default lr)
+  - Train RMSE (log $/sqft): 0.2007 | Validation RMSE (log $/sqft): 2.8225
+  - Best validation RMSE (log $/sqft): 0.3493 (≈ $/sqft 0.42)
+Final accuracy metrics (dollar space):
+  - < 5% error: 22.00%
+  - < 15% error: 57.41%
+  - RMSE: $389.50
+  - MAE: $49.43
+Final accuracy metrics (log space):
+  - RMSE: 0.3493
+  - MAE: 0.1917
+Comparison to targets:
+  - Target WITHOUT location features: < 5% = 24.60%, < 15% = 64.54%
+  - Target WITH location features: < 5% = 27.43%, < 15% = 70.10%
+  - Current run did not surpass either reference threshold.
+
 Notes
 -----
-- Both runs apply a log1p transform to the PRICE target during training, with metrics reported in both the original and transformed spaces.
+- All runs apply a log1p transform to the PRICE target during training where indicated, with metrics reported in both the original and transformed spaces.
 - The GLM runner defaults to the compact feature set; pass --one-hot to include expanded categorical encodings if memory allows.
+- The neural network logs indicate that despite stable training, the validation accuracy trails historical baselines; consider deeper architectures, learning-rate scheduling, and richer feature interactions to close the performance gap.
