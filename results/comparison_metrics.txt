@@ -1,0 +1,65 @@
+Comparison Metrics for PRICE Target Runs
+=======================================
+
+XGBoost Regression
+------------------
+Command: python src/xgboost_model.py --data src/sub_sample.csv --target PRICE --max-rows 10000
+Loaded data shape: (100000, 136)
+Cleaned data shape: (100000, 113)
+Feature matrix shape: (99957, 111)
+Target shape: (99957,)
+Train rows: 7994 | Validation rows: 1999 | Features: 35794
+Target mean (train): 507677.03 | Target mean (valid): 507863.87
+Validation metrics (dollar space):
+  - rmse: 237396.1291
+  - mae: 94566.1715
+  - r2: 0.7287
+Validation metrics (log1p target):
+  - rmse_transformed: 0.4144
+  - mae_transformed: 0.1924
+  - r2_transformed: 0.7055
+
+GLM (Tweedie) Regression
+------------------------
+Command: python src/glm_model.py --data src/sub_sample.csv --target PRICE --max-rows 50000
+Loaded data shape: (100000, 136)
+Cleaned data shape: (100000, 113)
+Feature matrix shape: (see CLI output)
+Target shape: (see CLI output)
+Train rows: 39980 | Validation rows: 9995 | Features: 111
+Target mean (train): 525536.11 | Target mean (valid): 511879.53
+Validation metrics (dollar space):
+  - rmse: 306319.6930
+  - mae: 127170.2510
+  - r2: 0.5784
+Validation metrics (log1p target):
+  - rmse_transformed: 0.4992
+  - mae_transformed: 0.2670
+  - r2_transformed: 0.5536
+
+Neural Network (Intrinsic MLP)
+-----------------------------
+Command: python src/neural_network_model.py --data sub_sample.csv --target LOG_PPSQFT --max-rows 100000
+Key adjustments: standardised training targets to float32 tensors to stabilise backpropagation and resumed the baseline architecture.
+Training summary:
+  - Epochs: 200 | Batch size: 256 | Optimiser: Adam (default lr)
+  - Train RMSE (log $/sqft): 0.2007 | Validation RMSE (log $/sqft): 2.8225
+  - Best validation RMSE (log $/sqft): 0.3493 (≈ $/sqft 0.42)
+Final accuracy metrics (dollar space):
+  - < 5% error: 22.00%
+  - < 15% error: 57.41%
+  - RMSE: $389.50
+  - MAE: $49.43
+Final accuracy metrics (log space):
+  - RMSE: 0.3493
+  - MAE: 0.1917
+Comparison to targets:
+  - Target WITHOUT location features: < 5% = 24.60%, < 15% = 64.54%
+  - Target WITH location features: < 5% = 27.43%, < 15% = 70.10%
+  - Current run did not surpass either reference threshold.
+
+Notes
+-----
+- All runs apply a log1p transform to the PRICE target during training where indicated, with metrics reported in both the original and transformed spaces.
+- The GLM runner defaults to the compact feature set; pass --one-hot to include expanded categorical encodings if memory allows.
+- The neural network logs indicate that despite stable training, the validation accuracy trails historical baselines; consider deeper architectures, learning-rate scheduling, and richer feature interactions to close the performance gap.
