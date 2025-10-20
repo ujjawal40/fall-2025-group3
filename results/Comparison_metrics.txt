@@ -1,0 +1,30 @@
+Run timestamp: (see commit date)
+Command: python src/xgboost_model.py --data src/sub_sample.csv --target PRICE --max-rows 10000
+
+Dataset summary
+---------------
+Loaded data shape: (100000, 136)
+Cleaned data shape: (100000, 113)
+Feature matrix shape: (99957, 111)
+Target shape: (99957,)
+Features used: 111 (see script output for full listing)
+Training split details:
+  Train rows: 7994 | Validation rows: 1999 | Features: 35794
+  Target mean (train): 507677.03 | Target mean (valid): 507863.87
+
+Validation metrics (dollar space)
+---------------------------------
+rmse: 237396.1291
+mae: 94566.1715
+r2: 0.7287
+
+Validation metrics (log1p transformed target)
+---------------------------------------------
+rmse_transformed: 0.4144
+mae_transformed: 0.1924
+r2_transformed: 0.7055
+
+Notes
+-----
+- The runner applies a log1p transform to the PRICE target during training to stabilise optimisation, then reports metrics in both the original dollar space and the transformed domain.
+- Use the --output-dir flag to save generated plots and --no-show to suppress interactive windows when running in headless environments.
