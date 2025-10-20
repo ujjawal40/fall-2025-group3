@@ -77,12 +77,19 @@ class ModelTrainer:
         
         # 2. DataLoaders
         tr_loader = DataLoader(
-            TensorDataset(torch.from_numpy(X_tr), torch.from_numpy(y_tr).unsqueeze(1)),
-            batch_size=batch_size, shuffle=True
+            TensorDataset(
+                torch.from_numpy(X_tr).float(),
+                torch.from_numpy(y_tr).unsqueeze(1).float(),
+            ),
+            batch_size=batch_size,
+            shuffle=True,
         )
         val_loader = DataLoader(
-            TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val).unsqueeze(1)),
-            batch_size=batch_size
+            TensorDataset(
+                torch.from_numpy(X_val).float(),
+                torch.from_numpy(y_val).unsqueeze(1).float(),
+            ),
+            batch_size=batch_size,
         )
         
         # 3. Model
@@ -105,7 +112,8 @@ class ModelTrainer:
             running = 0.0
             
             for xb, yb in tqdm(tr_loader, desc=f"Ep{epoch:02d}", leave=False):
-                xb, yb = xb.to(self.device), yb.to(self.device)
+                xb = xb.to(self.device).float()
+                yb = yb.to(self.device).float()
                 opt.zero_grad()
                 loss = loss_fn(model(xb), yb)
                 running += loss.mul(len(xb)).item()
