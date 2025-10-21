@@ -268,11 +268,14 @@ class DataPreprocessor:
         features_df = numeric_df.drop(columns=drop_cols, errors="ignore")
         features_df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-        for col in features_df.columns:
-            if features_df[col].isna().all():
-                features_df[col] = 0.0
+        for idx in range(features_df.shape[1]):
+            column_data = features_df.iloc[:, idx]
+            if column_data.isna().all():
+                column_data = column_data.fillna(0.0)
             else:
-                features_df[col] = features_df[col].fillna(features_df[col].median())
+                column_data = column_data.fillna(column_data.median())
+
+            features_df.iloc[:, idx] = column_data
 
         features_df = features_df.astype(np.float32)
         features_df.replace([np.inf, -np.inf, np.nan], 0.0, inplace=True)
