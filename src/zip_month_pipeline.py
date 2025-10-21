@@ -231,6 +231,31 @@ BIN_COLS_NUMERIC_01 = [
 BIN_COLS_TEXT_YN = ["basementYN"]
 
 
+def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename columns case-insensitively to match key catalog fields."""
+
+    canonical_targets = sorted(
+        set(
+            list(KEY_COLS)
+            + list(REQUIRED_COLS)
+            + COORDS_NUMERIC
+            + NUM_COLS_NUMERIC
+            + NUM_COLS_TEXT_TO_NUMERIC
+            + BIN_COLS_NUMERIC_01
+            + BIN_COLS_TEXT_YN
+        )
+    )
+    name_map = {name.lower(): name for name in canonical_targets}
+    rename: Dict[str, str] = {}
+    for col in df.columns:
+        target = name_map.get(col.lower())
+        if target and target != col:
+            rename[col] = target
+    if rename:
+        df = df.rename(columns=rename)
+    return df
+
+
 # --------------------------------------------------------------------------------------
 # Utility helpers
 # --------------------------------------------------------------------------------------
@@ -363,7 +388,8 @@ class CombinedEventsBuilder:
                 "path to run_pipeline(raw_table=...) or set the RAW_TABLE_PATH "
                 "constant."
             )
-        return pd.read_csv(self.raw_table)
+        df = pd.read_csv(self.raw_table)
+        return _canonicalize_columns(df)
 
     def build(self) -> pd.DataFrame:
         base = self._load_base()
@@ -378,7 +404,7 @@ class CombinedEventsBuilder:
         )
         if self.c_base_zpid_key in combined.columns:
             combined = combined.drop(columns=[self.c_base_zpid_key])
-        return combined
+        return _canonicalize_columns(combined)
 
     def _flatten_events(self, base_df: pd.DataFrame) -> pd.DataFrame:
         records: List[Dict[str, Any]] = []
@@ -785,6 +811,10 @@ def run_pipeline(raw_table: Path = RAW_TABLE_PATH) -> None:
     combined_events = builder.build()
     if combined_events.empty:
         raise RuntimeError("Combined events DataFrame is empty. Check PRICEHISTORY parsing.")
+    preview = combined_events.head(5)
+    print("Combined events preview (first 5 rows):")
+    with pd.option_context("display.max_columns", None):
+        print(preview.to_string(index=False))
     print("Starting ALL-FEATURES pipeline (ZIP index + Aggregates) with XGBoost…")
     idx_sp, ht_share_sp, num_agg_sp, bin_agg_sp = ZipMonthIndexBuilder(combined_events).build()
     feat_sp = ZipIndexFeatureizer(idx_sp, ht_share_sp, num_agg_sp, bin_agg_sp).build()
