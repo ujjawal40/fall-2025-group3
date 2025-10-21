@@ -255,17 +255,45 @@ def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
     name_map = {_normalize_name(name): name for name in canonical_targets}
+    alias_map: Dict[str, str] = {
+        # Mortgage / macro aliases that show up in CSV extracts
+        "weeklyavgmortgagerate": "WEEKLY_AVERAGE_MORTGAGE_RATE",
+        "weeklyaveragemortgagerate": "WEEKLY_AVERAGE_MORTGAGE_RATE",
+        "monthlyavgmortgagerate": "WEEKLY_AVERAGE_MORTGAGE_RATE",
+        "monthlyaveragemortgagerate": "WEEKLY_AVERAGE_MORTGAGE_RATE",
+        "avgmortgagerate": "WEEKLY_AVERAGE_MORTGAGE_RATE",
+        "mortgagerate": "WEEKLY_AVERAGE_MORTGAGE_RATE",
+        # Unemployment variants
+        "monthlyunemploymentrate": "UNEMPLOYMENT_RATE",
+        "unemploymentrate": "UNEMPLOYMENT_RATE",
+        "avgunemploymentrate": "UNEMPLOYMENT_RATE",
+        # County fallbacks – common exports only ship FIPS codes
+        "countyfips": "COUNTY",
+        "countyname": "COUNTY",
+    }
     rename: Dict[str, str] = {}
     already_has: set[str] = {col for col in df.columns}
     for col in df.columns:
         normalized = _normalize_name(col)
         target = name_map.get(normalized)
-        if not target or target == col:
+        if target:
+            if target == col:
+                continue
+            if target in already_has:
+                # If the canonical name already exists, do not clobber it.
+                continue
+            rename[col] = target
             continue
-        if target in already_has:
-            # If the canonical name already exists, do not clobber it.
-            continue
-        rename[col] = target
+
+        alias_target = alias_map.get(normalized)
+        if alias_target:
+            if alias_target in df.columns:
+                # Only backfill missing values so we do not overwrite real data.
+                mask = df[alias_target].isna()
+                if mask.any():
+                    df.loc[mask, alias_target] = df.loc[mask, col]
+            else:
+                df[alias_target] = df[col]
     if rename:
         df = df.rename(columns=rename)
     return df
