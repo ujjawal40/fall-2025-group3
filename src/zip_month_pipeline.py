@@ -30,7 +30,35 @@ import xgboost as xgb
 # Configuration (mirrors notebook constants)
 # --------------------------------------------------------------------------------------
 
-RAW_TABLE_PATH = Path("src/sub_sample.csv")
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def _resolve_default_raw_table() -> Path:
+    """Locate ``sub_sample.csv`` relative to common entry points.
+
+    Users sometimes execute the script from the repository root (``python src/…``)
+    or from inside ``src`` directly. We check the most common directories so the
+    pipeline can discover the CSV regardless of the current working directory.
+    """
+
+    candidates = [
+        SCRIPT_DIR / "sub_sample.csv",
+        SCRIPT_DIR.parent / "src" / "sub_sample.csv",
+        SCRIPT_DIR.parent / "sub_sample.csv",
+        Path.cwd() / "src" / "sub_sample.csv",
+        Path.cwd() / "sub_sample.csv",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    # Fallback to the script-local location even if it does not yet exist so we
+    # surface a consistent error message in ``CombinedEventsBuilder``.
+    return SCRIPT_DIR / "sub_sample.csv"
+
+
+RAW_TABLE_PATH = _resolve_default_raw_table()
 
 MIN_START_DATE = "2022-01-01"
 HOLDOUT_DAYS = 60
@@ -303,7 +331,7 @@ class CombinedEventsBuilder:
         pricehistory_col: str = "PRICEHISTORY",
         scrape_ts_col: str = "SCRAPEDAT",
     ) -> None:
-        self.raw_table = Path(raw_table)
+        self.raw_table = Path(raw_table).expanduser()
         self.zpid_col = zpid_col
         self.pricehistory_col = pricehistory_col
         self.scrape_ts_col = scrape_ts_col
@@ -329,7 +357,12 @@ class CombinedEventsBuilder:
 
     def _load_base(self) -> pd.DataFrame:
         if not self.raw_table.exists():
-            raise FileNotFoundError(f"Raw table CSV not found: {self.raw_table}")
+            raise FileNotFoundError(
+                "Raw table CSV not found: "
+                f"{self.raw_table}. If you relocated sub_sample.csv, pass its "
+                "path to run_pipeline(raw_table=...) or set the RAW_TABLE_PATH "
+                "constant."
+            )
         return pd.read_csv(self.raw_table)
 
     def build(self) -> pd.DataFrame:
