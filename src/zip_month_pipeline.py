@@ -65,7 +65,7 @@ HOLDOUT_DAYS = 60
 MIN_SOLD_PER_ZIP_M = 20
 MIN_LIST_PER_ZIP_M = 40
 TOPK_HOMETYPES = 6
-CHUNK_LIMIT_ROWS = 100_000
+CHUNK_LIMIT_ROWS = 800_000
 RANDOM_SEED = 42
 
 KEY_COLS = [
@@ -296,6 +296,46 @@ def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
                 df[alias_target] = df[col]
     if rename:
         df = df.rename(columns=rename)
+
+    # Final fallbacks: if canonical columns are still absent, copy from
+    # commonly supplied alternates.  This protects against extracts whose
+    # headers do not match any of the fuzzy rules above (for example,
+    # MONTHLY_* columns or pure FIPS codes).
+    def _ensure_from_alias(target: str, candidates: Iterable[str]) -> None:
+        if target in df.columns:
+            return
+        for cand in candidates:
+            if cand in df.columns:
+                df[target] = df[cand]
+                return
+
+    _ensure_from_alias(
+        "WEEKLY_AVERAGE_MORTGAGE_RATE",
+        [
+            "MONTHLY_AVG_MORTGAGE_RATE",
+            "MONTHLY_AVERAGE_MORTGAGE_RATE",
+            "AVG_MORTGAGE_RATE",
+            "MORTGAGE_RATE",
+        ],
+    )
+    _ensure_from_alias(
+        "UNEMPLOYMENT_RATE",
+        [
+            "MONTHLY_UNEMPLOYMENT_RATE",
+            "UNEMPLOYMENT",
+            "AVG_UNEMPLOYMENT_RATE",
+        ],
+    )
+    _ensure_from_alias(
+        "COUNTY",
+        [
+            "COUNTY_NAME",
+            "COUNTYNAME",
+            "COUNTY_FIPS",
+            "COUNTYFIPS",
+            "FIPS",
+        ],
+    )
     return df
 
 
