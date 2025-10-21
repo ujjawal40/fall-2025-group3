@@ -239,8 +239,8 @@ class ModelTrainer:
                 current_lr = opt.param_groups[0]["lr"]
                 print(
                     f"Epoch {epoch:02d} | tr {rmse_tr:.4f} | val {rmse_val:.4f} | "
-                    f"5%: {acc_5pct:.1f}% | 15%: {acc_15pct:.1f}% | lr {current_lr:.2e} | "
-                    f"{hist['epoch_sec'][-1]:.1f}s"
+                    f"5%: {acc_5pct_ppsqft:.1f}% | 15%: {acc_15pct_ppsqft:.1f}% | "
+                    f"lr {current_lr:.2e} | {hist['epoch_sec'][-1]:.1f}s"
                 )
 
             if rmse_val + 1e-4 < best_rmse:
