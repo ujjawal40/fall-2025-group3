@@ -231,8 +231,17 @@ BIN_COLS_NUMERIC_01 = [
 BIN_COLS_TEXT_YN = ["basementYN"]
 
 
+def _normalize_name(name: str) -> str:
+    """Collapse a column name to lowercase alphanumerics for fuzzy matching."""
+
+    if name is None:
+        return ""
+    cleaned = ''.join(ch for ch in str(name).lower() if ch.isalnum())
+    return cleaned
+
+
 def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename columns case-insensitively to match key catalog fields."""
+    """Rename columns flexibly so downstream steps find the expected fields."""
 
     canonical_targets = sorted(
         set(
@@ -245,12 +254,18 @@ def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
             + BIN_COLS_TEXT_YN
         )
     )
-    name_map = {name.lower(): name for name in canonical_targets}
+    name_map = {_normalize_name(name): name for name in canonical_targets}
     rename: Dict[str, str] = {}
+    already_has: set[str] = {col for col in df.columns}
     for col in df.columns:
-        target = name_map.get(col.lower())
-        if target and target != col:
-            rename[col] = target
+        normalized = _normalize_name(col)
+        target = name_map.get(normalized)
+        if not target or target == col:
+            continue
+        if target in already_has:
+            # If the canonical name already exists, do not clobber it.
+            continue
+        rename[col] = target
     if rename:
         df = df.rename(columns=rename)
     return df
@@ -502,10 +517,18 @@ class ZipMonthIndexBuilder:
     alpha_sold: float = 10.0
     alpha_msa: float = 50.0
 
+    def __post_init__(self) -> None:
+        # Ensure column canonicalization even if the caller bypassed CombinedEventsBuilder.
+        self.ce = _canonicalize_columns(self.ce.copy())
+
     def _base(self) -> pd.DataFrame:
         missing = [c for c in REQUIRED_COLS if c not in self.ce.columns]
         if missing:
-            raise ValueError(f"Missing columns in combined_events: {missing}")
+            available = ", ".join(sorted(self.ce.columns))
+            raise ValueError(
+                "Missing columns in combined_events: "
+                f"{missing}. Available columns: {available}"
+            )
         base = self.ce[self.ce["EVT_IS_RENTAL"] == 0].copy()
         base["EVT_DAY"] = _ensure_datetime(base["EVT_DATE"]).dt.date
         base["YM"] = _ensure_datetime(base["EVT_DATE"]).dt.to_period("M").dt.to_timestamp()
