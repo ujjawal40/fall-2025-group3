@@ -288,10 +288,6 @@ def main():
     print(f"Original data shape: {df.shape}")
     print(f"Columns available: {list(df.columns)}")
 
-    if len(df) > 50000:
-        df = df.sample(n=50000, random_state=42).reset_index(drop=True)
-        print(f"Subsampled dataset to {len(df):,} rows to balance memory and training time.")
-
     # Clean and engineer features
     print("\n2. Cleaning and engineering features...")
     clean_df = preprocessor.clean_and_engineer(

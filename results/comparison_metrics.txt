@@ -39,35 +39,35 @@ Validation metrics (log1p target):
 
 Neural Network (Intrinsic MLP)
 ------------------------------
-Command: python src/neural_network_model.py --data sub_sample.csv --target LOG_PPSQFT --max-rows 100000
-Key adjustments: forced both features and targets to float32 tensors inside the DataLoader pipeline to stop PyTorch from mixing float64 batches during backpropagation. No other architectural tweaks were introduced for this run.
+Command: python src/neural_network_model.py
+Key adjustments: re-enabled location-aware one-hot encodings (each capped at the 50 most frequent categories), widened the MLP stack with dropout (0.25), used AdamW (lr=5e-4, weight decay=5e-4) under an 8-epoch warmup + cosine decay schedule, introduced price-weighted mini-batches, and activated early stopping with patience 20. The pipeline now consumes the full 100,000 cleaned rows instead of subsampling so the neural net trains on the same coverage as the XGBoost and GLM baselines.
 
 Training behaviour snapshot:
-  - Optimiser & schedule: Adam (default lr=0.001) without weight decay, 200 epochs, batch size 256, ReLU activations with dropout 0.1 between hidden layers.
-  - Train loss settled at RMSE 0.2007 in log $/sqft, showing the model can fit the training distribution once the dtype issue was removed.
-  - Validation curve spiked to RMSE 2.8225 near the final epoch, but the best checkpoint recorded RMSE 0.3493 (≈$0.42 per sqft). The late-epoch blow-up indicates mild overfitting after epoch ~140.
+  - Training RMSE settled near 0.200 in log $/sqft, while validation RMSE fluctuated between 0.29 and 0.33 before patience triggered at epoch 143.
+  - Using every row improves stability versus the earlier 50k subsample runs and removes variance caused by random sampling.
+  - The expanded architecture and schedule increased per-epoch cost but produced smoother convergence.
 
-Evaluation snapshot (best checkpoint):
-  - Dollar space: RMSE $389.50 | MAE $49.43 | <5% accuracy 22.00% | <15% accuracy 57.41%
-  - Log space: RMSE 0.3493 | MAE 0.1917
-  - Historical targets: WITHOUT location → <5% 24.60%, <15% 64.54%; WITH location → <5% 27.43%, <15% 70.10%. Current run trails by 2.6–12.7 percentage points.
+Evaluation snapshot (best checkpoint → best_intrinsic_mlp.pt):
+  - Dollar space: RMSE $114.87 | MAE $45.81 | <5% accuracy 20.27% | <15% accuracy 57.32%
+  - Log space: RMSE 0.2891 | MAE 0.1827
+  - Historical targets: WITHOUT location → <5% 24.60%, <15% 64.54%; WITH location → <5% 27.43%, <15% 70.10%. Despite richer features, the run still trails by 4.3–12.8 percentage points.
 
 Interpretation & diagnostics:
-  - The gap between training RMSE (0.2007) and best validation RMSE (0.3493) shows the model still generalises reasonably, but the final epochs drift because we continue training past the point of minimal validation error. Early stopping around epoch 140 would keep the lower validation loss.
-  - Accuracy shortfalls stem from using only dense numeric features with light dropout; historical targets were achieved with richer location-aware embeddings and sometimes higher-capacity networks.
-  - Dollar-space RMSE of ~$390 per sqft implies large relative errors on high-priced properties. The model is more stable in log space, so denormalising predictions amplifies residuals on luxury listings.
+  - Full-dataset training plus price-weighted loss reduces dollar RMSE from ~$389 to ~$115 and drops log RMSE from 0.3493 to 0.2891 compared with the previous numeric-only run, showing the upgrades helped calibration.
+  - Percentage accuracy remains below target because residual variance in high-price metros is still large; location one-hots alone are not capturing fine-grained neighbourhood effects.
+  - Training and validation curves stay relatively close, implying the model is now capacity-limited rather than overfitting; larger hidden widths or learned embeddings should be explored next.
 
-Actionable improvement plan:
-  1. Enable early stopping/patience (e.g., stop after 10 epochs without validation improvement) so the final checkpoint matches the 0.3493 RMSE level.
-  2. Re-introduce location features (ZIP/CITY embeddings or one-hot) and engineered interaction terms that previously lifted <15% accuracy above 70%.
-  3. Tune regularisation: add weight decay (1e-4–1e-5) and increase dropout to 0.2–0.3 to combat the late-epoch overfit.
-  4. Experiment with a two-phase learning-rate schedule (warm-up then cosine decay or step decay) to maintain progress without overshooting after the loss plateau.
-  5. Augment training with stratified mini-batches or reweighting so rare, high-price buckets influence the objective more evenly, reducing dollar-space RMSE.
+Next steps:
+  1. Replace one-hots with learnable ZIP/CITY embeddings to capture neighbourhood structure with fewer parameters.
+  2. Engineer interaction features (e.g., SQFT × HOTNESS_SCORE, PROPERTY_AGE buckets) via the shared preprocessor so tree and GLM baselines benefit in tandem.
+  3. Experiment with deeper or residual MLP stacks while preserving dropout/weight decay to lift representational capacity.
+  4. Incorporate LR restarts or ReduceLROnPlateau once validation RMSE stalls to extract more from later epochs.
+  5. Produce decile-wise calibration/error plots to identify which price bands drive the <5%/<15% shortfall and tune loss weights accordingly.
 
-Outcome summary: The float32 casting fix allowed the run to complete and produce checkpoints again, but meeting the historical accuracy targets will require the early-stopping/regularisation tweaks above plus restored location signal.
+Outcome summary: Training on the entire dataset with the enhanced regimen materially lowered RMSE, yet both <5% and <15% accuracy goals remain unmet. Closing that gap now depends on stronger location representations and targeted feature interactions rather than additional subsampling.
 
 Notes
 -----
 - All runs apply a log1p transform to the PRICE target during training where indicated, with metrics reported in both the original and transformed spaces.
 - The GLM runner defaults to the compact feature set; pass --one-hot to include expanded categorical encodings if memory allows.
-- The neural network logs indicate that despite stable training, the validation accuracy trails historical baselines; consider deeper architectures, learning-rate scheduling, and richer feature interactions to close the performance gap.
+- The neural network logs indicate that despite improved RMSE, the validation accuracy still trails historical baselines; richer geospatial features and targeted loss weighting remain the top levers.
