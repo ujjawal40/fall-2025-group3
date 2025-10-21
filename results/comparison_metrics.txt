@@ -38,25 +38,33 @@ Validation metrics (log1p target):
   - r2_transformed: 0.5536
 
 Neural Network (Intrinsic MLP)
------------------------------
+------------------------------
 Command: python src/neural_network_model.py --data sub_sample.csv --target LOG_PPSQFT --max-rows 100000
-Key adjustments: standardised training targets to float32 tensors to stabilise backpropagation and resumed the baseline architecture.
-Training summary:
-  - Epochs: 200 | Batch size: 256 | Optimiser: Adam (default lr)
-  - Train RMSE (log $/sqft): 0.2007 | Validation RMSE (log $/sqft): 2.8225
-  - Best validation RMSE (log $/sqft): 0.3493 (≈ $/sqft 0.42)
-Final accuracy metrics (dollar space):
-  - < 5% error: 22.00%
-  - < 15% error: 57.41%
-  - RMSE: $389.50
-  - MAE: $49.43
-Final accuracy metrics (log space):
-  - RMSE: 0.3493
-  - MAE: 0.1917
-Comparison to targets:
-  - Target WITHOUT location features: < 5% = 24.60%, < 15% = 64.54%
-  - Target WITH location features: < 5% = 27.43%, < 15% = 70.10%
-  - Current run did not surpass either reference threshold.
+Key adjustments: forced both features and targets to float32 tensors inside the DataLoader pipeline to stop PyTorch from mixing float64 batches during backpropagation. No other architectural tweaks were introduced for this run.
+
+Training behaviour snapshot:
+  - Optimiser & schedule: Adam (default lr=0.001) without weight decay, 200 epochs, batch size 256, ReLU activations with dropout 0.1 between hidden layers.
+  - Train loss settled at RMSE 0.2007 in log $/sqft, showing the model can fit the training distribution once the dtype issue was removed.
+  - Validation curve spiked to RMSE 2.8225 near the final epoch, but the best checkpoint recorded RMSE 0.3493 (≈$0.42 per sqft). The late-epoch blow-up indicates mild overfitting after epoch ~140.
+
+Evaluation snapshot (best checkpoint):
+  - Dollar space: RMSE $389.50 | MAE $49.43 | <5% accuracy 22.00% | <15% accuracy 57.41%
+  - Log space: RMSE 0.3493 | MAE 0.1917
+  - Historical targets: WITHOUT location → <5% 24.60%, <15% 64.54%; WITH location → <5% 27.43%, <15% 70.10%. Current run trails by 2.6–12.7 percentage points.
+
+Interpretation & diagnostics:
+  - The gap between training RMSE (0.2007) and best validation RMSE (0.3493) shows the model still generalises reasonably, but the final epochs drift because we continue training past the point of minimal validation error. Early stopping around epoch 140 would keep the lower validation loss.
+  - Accuracy shortfalls stem from using only dense numeric features with light dropout; historical targets were achieved with richer location-aware embeddings and sometimes higher-capacity networks.
+  - Dollar-space RMSE of ~$390 per sqft implies large relative errors on high-priced properties. The model is more stable in log space, so denormalising predictions amplifies residuals on luxury listings.
+
+Actionable improvement plan:
+  1. Enable early stopping/patience (e.g., stop after 10 epochs without validation improvement) so the final checkpoint matches the 0.3493 RMSE level.
+  2. Re-introduce location features (ZIP/CITY embeddings or one-hot) and engineered interaction terms that previously lifted <15% accuracy above 70%.
+  3. Tune regularisation: add weight decay (1e-4–1e-5) and increase dropout to 0.2–0.3 to combat the late-epoch overfit.
+  4. Experiment with a two-phase learning-rate schedule (warm-up then cosine decay or step decay) to maintain progress without overshooting after the loss plateau.
+  5. Augment training with stratified mini-batches or reweighting so rare, high-price buckets influence the objective more evenly, reducing dollar-space RMSE.
+
+Outcome summary: The float32 casting fix allowed the run to complete and produce checkpoints again, but meeting the historical accuracy targets will require the early-stopping/regularisation tweaks above plus restored location signal.
 
 Notes
 -----

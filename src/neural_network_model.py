@@ -16,17 +16,19 @@ from data_preprocessor import DataPreprocessor
 
 
 class WideMLP(nn.Module):
-    """Wide Multi-Layer Perceptron with Batch Normalization."""
-    
-    def __init__(self, n_in: int, layers: tuple):
+    """Wide Multi-Layer Perceptron with Batch Normalization and dropout."""
+
+    def __init__(self, n_in: int, layers: tuple, dropout_prob: float = 0.2):
         super().__init__()
         mods = []
         in_f = n_in
-        
+
         for h in layers:
-            mods += [nn.Linear(in_f, h), nn.BatchNorm1d(h), nn.ReLU()]
+            mods.extend([nn.Linear(in_f, h), nn.BatchNorm1d(h), nn.ReLU()])
+            if dropout_prob > 0:
+                mods.append(nn.Dropout(dropout_prob))
             in_f = h
-        
+
         mods.append(nn.Linear(in_f, 1))
         self.net = nn.Sequential(*mods)
     
@@ -55,31 +57,45 @@ class ModelTrainer:
         weight_decay: float = 1e-4,
         patience: int = 5,
         hidden_layers: tuple = (128, 64, 32),
+        dropout_prob: float = 0.2,
         verbose: bool = True,
     ) -> Tuple[nn.Module, Dict[str, Any], StandardScaler, np.ndarray]:
         """Train the neural network model."""
-        
+
         if verbose:
             print(f"Rows for training: {X.shape[0]:,} | features: {X.shape[1]}")
-        
+
         # 1. Split and scale
-        X_tr, X_val, y_tr, y_val = train_test_split(
-            X, y, test_size=test_size, random_state=random_state
+        price_psf = np.expm1(y)
+        price_quantiles = np.quantile(price_psf, [0.5, 0.9])
+        sample_weights = np.ones_like(price_psf, dtype=np.float32)
+        sample_weights[price_psf >= price_quantiles[0]] = 1.2
+        sample_weights[price_psf >= price_quantiles[1]] = 1.6
+
+        X_tr, X_val, y_tr, y_val, w_tr, w_val = train_test_split(
+            X,
+            y,
+            sample_weights,
+            test_size=test_size,
+            random_state=random_state,
         )
 
         # Ensure labels match the float32 tensor dtype used for training.
         y_tr = y_tr.astype(np.float32)
         y_val = y_val.astype(np.float32)
-        
+        w_tr = w_tr.astype(np.float32)
+        w_val = w_val.astype(np.float32)
+
         scaler = StandardScaler()
         X_tr = scaler.fit_transform(X_tr).astype(np.float32)
         X_val = scaler.transform(X_val).astype(np.float32)
-        
+
         # 2. DataLoaders
         tr_loader = DataLoader(
             TensorDataset(
                 torch.from_numpy(X_tr).float(),
                 torch.from_numpy(y_tr).unsqueeze(1).float(),
+                torch.from_numpy(w_tr).unsqueeze(1).float(),
             ),
             batch_size=batch_size,
             shuffle=True,
@@ -88,74 +104,110 @@ class ModelTrainer:
             TensorDataset(
                 torch.from_numpy(X_val).float(),
                 torch.from_numpy(y_val).unsqueeze(1).float(),
+                torch.from_numpy(w_val).unsqueeze(1).float(),
             ),
             batch_size=batch_size,
         )
-        
+
         # 3. Model
-        model = WideMLP(X_tr.shape[1], hidden_layers).to(self.device)
+        model = WideMLP(X_tr.shape[1], hidden_layers, dropout_prob=dropout_prob).to(self.device)
         opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        loss_fn = nn.MSELoss()
-        
-        def lr_now(ep):  # linear warm-up then flat
-            return lr * (ep + 1) / warmup_epochs if ep < warmup_epochs else lr
-        
+        loss_fn = nn.MSELoss(reduction="none")
+
+        def lr_lambda(epoch: int) -> float:
+            if warmup_epochs <= 0:
+                warm = 1.0
+            elif epoch < warmup_epochs:
+                warm = (epoch + 1) / warmup_epochs
+            else:
+                warm = 1.0
+
+            if epoch < warmup_epochs:
+                decay = 1.0
+            else:
+                progress = (epoch - warmup_epochs) / max(1, n_epochs - warmup_epochs)
+                decay = 0.5 * (1 + math.cos(math.pi * progress))
+
+            return warm * decay
+
         best_rmse, wait = math.inf, 0
-        hist = {"rmse": [], "val_rmse": [], "val_acc_5pct": [], "val_acc_15pct": [], "epoch_sec": []}
-        
+        hist = {
+            "rmse": [],
+            "val_rmse": [],
+            "val_acc_5pct": [],
+            "val_acc_15pct": [],
+            "epoch_sec": [],
+            "lr": [],
+        }
+
         for epoch in range(1, n_epochs + 1):
-            for g in opt.param_groups:
-                g["lr"] = lr_now(epoch - 1)
-            
+            lr_factor = lr_lambda(epoch - 1)
+            for group in opt.param_groups:
+                group["lr"] = lr * lr_factor
+
             t0 = time.time()
             model.train()
             running = 0.0
-            
-            for xb, yb in tqdm(tr_loader, desc=f"Ep{epoch:02d}", leave=False):
+            total_weight = 0.0
+
+            for xb, yb, wb in tqdm(tr_loader, desc=f"Ep{epoch:02d}", leave=False):
                 xb = xb.to(self.device).float()
                 yb = yb.to(self.device).float()
+                wb = wb.to(self.device).float()
                 opt.zero_grad()
-                loss = loss_fn(model(xb), yb)
-                running += loss.mul(len(xb)).item()
+                preds = model(xb)
+                per_sample = loss_fn(preds, yb) * wb
+                batch_weight = wb.sum().clamp_min(1e-6)
+                loss = per_sample.sum() / batch_weight
+                running += per_sample.sum().item()
+                total_weight += batch_weight.item()
                 loss.backward()
                 opt.step()
-            
-            rmse_tr = math.sqrt(running / len(tr_loader.dataset))
+
+            denom = total_weight if total_weight > 0 else len(tr_loader.dataset)
+            rmse_tr = math.sqrt(running / max(1e-6, denom))
             hist["rmse"].append(rmse_tr)
-            
+            hist["lr"].append(opt.param_groups[0]["lr"])
+
             # Validation
             model.eval()
             with torch.no_grad():
-                preds = torch.cat([model(xb.to(self.device)) for xb, _ in val_loader]).cpu().squeeze().numpy()
-            
+                preds = torch.cat([
+                    model(xb.to(self.device))
+                    for xb, _, _ in val_loader
+                ]).cpu().squeeze().numpy()
+
             # Handle potential NaN values in predictions
             if np.isnan(preds).any():
                 print(f"Warning: Found {np.isnan(preds).sum()} NaN predictions in epoch {epoch}")
                 preds = np.nan_to_num(preds, nan=0.0)
-            
+
             rmse_val = math.sqrt(mean_squared_error(y_val, preds))
-            
+
             # Calculate percentage accuracy metrics
             actual_prices = np.expm1(y_val)  # Convert back from log space
             predicted_prices = np.expm1(preds)
-            
+
             # Calculate percentage errors
             pct_errors = np.abs((actual_prices - predicted_prices) / actual_prices) * 100
-            
+
             # Calculate accuracy within thresholds
             acc_5pct = (pct_errors < 5).mean() * 100
             acc_15pct = (pct_errors < 15).mean() * 100
-            
-            hist["rmse"].append(rmse_tr)
+
             hist["val_rmse"].append(rmse_val)
             hist["val_acc_5pct"].append(acc_5pct)
             hist["val_acc_15pct"].append(acc_15pct)
             hist["epoch_sec"].append(time.time() - t0)
-            
+
             if verbose:
-                print(f"Epoch {epoch:02d} | tr {rmse_tr:.4f} | val {rmse_val:.4f} | "
-                      f"5%: {acc_5pct:.1f}% | 15%: {acc_15pct:.1f}% | {hist['epoch_sec'][-1]:.1f}s")
-            
+                current_lr = opt.param_groups[0]["lr"]
+                print(
+                    f"Epoch {epoch:02d} | tr {rmse_tr:.4f} | val {rmse_val:.4f} | "
+                    f"5%: {acc_5pct:.1f}% | 15%: {acc_15pct:.1f}% | lr {current_lr:.2e} | "
+                    f"{hist['epoch_sec'][-1]:.1f}s"
+                )
+
             if rmse_val + 1e-4 < best_rmse:
                 best_rmse, wait = rmse_val, 0
                 torch.save(model.state_dict(), "best_intrinsic_mlp.pt")
@@ -174,7 +226,10 @@ class ModelTrainer:
             model.load_state_dict(torch.load("best_intrinsic_mlp.pt"))
             model.eval()
             with torch.no_grad():
-                final_preds = torch.cat([model(xb.to(self.device)) for xb, _ in val_loader]).cpu().squeeze().numpy()
+                final_preds = torch.cat([
+                    model(xb.to(self.device))
+                    for xb, _, _ in val_loader
+                ]).cpu().squeeze().numpy()
 
             actual_prices = np.expm1(y_val)
             predicted_prices = np.expm1(final_preds)
@@ -217,7 +272,7 @@ class ModelTrainer:
 def main():
     """Main function to execute the complete pipeline."""
     print("Starting House Price Prediction Pipeline...")
-    
+
     # Initialize components
     preprocessor = DataPreprocessor()
     trainer = ModelTrainer()
@@ -225,19 +280,28 @@ def main():
     # Load and clean data
     print("\n1. Loading and preprocessing data...")
     df = preprocessor.load_data('sub_sample.csv')
-    
+
     if df.empty:
         print("No data loaded. Exiting.")
         return
-    
+
     print(f"Original data shape: {df.shape}")
     print(f"Columns available: {list(df.columns)}")
-    
+
+    if len(df) > 50000:
+        df = df.sample(n=50000, random_state=42).reset_index(drop=True)
+        print(f"Subsampled dataset to {len(df):,} rows to balance memory and training time.")
+
     # Clean and engineer features
     print("\n2. Cleaning and engineering features...")
-    clean_df = preprocessor.clean_and_engineer(df, one_hot=False)
+    clean_df = preprocessor.clean_and_engineer(
+        df,
+        one_hot=True,
+        max_categories=50,
+        min_frequency=0.01,
+    )
     print(f"Cleaned data shape: {clean_df.shape}")
-    
+
     # Prepare features for training
     print("\n3. Preparing features for training...")
     X, y, feature_names = preprocessor.prepare_features(clean_df)
@@ -248,12 +312,14 @@ def main():
     print("\n4. Training neural network model...")
     model, history, scaler, feat_names = trainer.train_model(
         X, y, feature_names,
-        n_epochs=200,
-        batch_size=258,
-        lr=3e-4,
-        weight_decay=1e-4,
-        patience=100,
-        hidden_layers=(128, 64, 32),
+        n_epochs=160,
+        batch_size=256,
+        lr=5e-4,
+        weight_decay=5e-4,
+        patience=20,
+        warmup_epochs=8,
+        hidden_layers=(256, 128, 64, 32),
+        dropout_prob=0.25,
         verbose=True
     )
     
@@ -262,9 +328,9 @@ def main():
     print(f"Feature scaler and names available for predictions")
     
     # Plot training history
-    plt.figure(figsize=(15, 5))
-    
-    plt.subplot(1, 3, 1)
+    plt.figure(figsize=(18, 5))
+
+    plt.subplot(1, 4, 1)
     plt.plot(history["rmse"], label="Training RMSE")
     plt.plot(history["val_rmse"], label="Validation RMSE")
     plt.xlabel("Epoch")
@@ -272,8 +338,8 @@ def main():
     plt.title("Training History")
     plt.legend()
     plt.grid(True)
-    
-    plt.subplot(1, 3, 2)
+
+    plt.subplot(1, 4, 2)
     plt.plot(history["val_acc_5pct"], label="< 5% Accuracy", color='green')
     plt.axhline(y=24.60, color='red', linestyle='--', label='Target (WITHOUT Loc)')
     plt.xlabel("Epoch")
@@ -281,8 +347,8 @@ def main():
     plt.title("5% Error Accuracy")
     plt.legend()
     plt.grid(True)
-    
-    plt.subplot(1, 3, 3)
+
+    plt.subplot(1, 4, 3)
     plt.plot(history["val_acc_15pct"], label="< 15% Accuracy", color='blue')
     plt.axhline(y=64.54, color='red', linestyle='--', label='Target (WITHOUT Loc)')
     plt.xlabel("Epoch")
@@ -290,7 +356,15 @@ def main():
     plt.title("15% Error Accuracy")
     plt.legend()
     plt.grid(True)
-    
+
+    plt.subplot(1, 4, 4)
+    plt.plot(history["lr"], label="Learning Rate", color='purple')
+    plt.xlabel("Epoch")
+    plt.ylabel("LR")
+    plt.title("Learning Rate Schedule")
+    plt.legend()
+    plt.grid(True)
+
     plt.tight_layout()
     plt.savefig("training_history.png", dpi=300, bbox_inches='tight')
     plt.show()

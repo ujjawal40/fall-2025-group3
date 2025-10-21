@@ -121,7 +121,14 @@ class DataPreprocessor:
 
         return pd.to_numeric(cleaned, errors="coerce")
 
-    def clean_and_engineer(self, df: pd.DataFrame, one_hot: bool = True) -> pd.DataFrame:
+    def clean_and_engineer(
+        self,
+        df: pd.DataFrame,
+        *,
+        one_hot: bool = True,
+        max_categories: int | None = 60,
+        min_frequency: float = 0.005,
+    ) -> pd.DataFrame:
         """Replicate the neural-network feature engineering workflow."""
 
         df = df.copy()
@@ -215,6 +222,22 @@ class DataPreprocessor:
                 truly_cat.append(col)
 
         if one_hot and truly_cat:
+            sample_size = len(df)
+
+            def prune_column(col: str) -> pd.Series:
+                series = df[col].astype(str).fillna("nan")
+                value_counts = series.value_counts(dropna=False)
+
+                keepers = set(value_counts.head(max_categories).index if max_categories else value_counts.index)
+                if min_frequency > 0:
+                    freq_threshold = min_frequency * sample_size
+                    keepers.update(value_counts[value_counts >= freq_threshold].index)
+
+                return series.where(series.isin(keepers), "OTHER")
+
+            for col in truly_cat:
+                df[col] = prune_column(col)
+
             df = pd.get_dummies(
                 df, columns=truly_cat, dummy_na=True, prefix_sep="==", dtype=np.float32
             )
