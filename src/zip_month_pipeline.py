@@ -946,7 +946,15 @@ def run_pipeline(raw_table: Path = RAW_TABLE_PATH) -> None:
     for col in feat_cols:
         if not pd.api.types.is_numeric_dtype(df[col]):
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df[feat_cols] = df[feat_cols].fillna(0.0)
+    if feat_cols:
+        inf_counts = {col: int(np.isinf(df[col]).sum()) for col in feat_cols if np.isinf(df[col]).any()}
+        if inf_counts:
+            print(f"Replacing inf/-inf values in feature columns: {inf_counts}")
+        df[feat_cols] = (
+            df[feat_cols]
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+        )
     feat_cols = [c for c in feat_cols if df.loc[trn_mask, c].nunique() > 1]
     print(f"Pre-prune features: {len(feat_cols)}")
     boost_feats = {
