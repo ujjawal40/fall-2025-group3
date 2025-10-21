@@ -197,13 +197,17 @@ class ModelTrainer:
                 print(f"Warning: Found {np.isnan(preds).sum()} NaN predictions in epoch {epoch}")
                 preds = np.nan_to_num(preds, nan=0.0)
 
-            rmse_val = math.sqrt(mean_squared_error(y_val, preds))
+            preds = np.clip(preds, a_min=-20.0, a_max=20.0)
+            safe_y_val = np.clip(y_val, a_min=-20.0, a_max=20.0)
+
+            rmse_val = math.sqrt(mean_squared_error(safe_y_val, preds))
 
             # Calculate percentage accuracy metrics in price-per-square-foot space
-            actual_ppsqft = np.expm1(y_val)
+            actual_ppsqft = np.expm1(safe_y_val)
             predicted_ppsqft = np.expm1(preds)
+            denom_ppsqft = np.clip(actual_ppsqft, a_min=1e-6, a_max=None)
             pct_errors_ppsqft = (
-                np.abs((actual_ppsqft - predicted_ppsqft) / actual_ppsqft) * 100
+                np.abs((actual_ppsqft - predicted_ppsqft) / denom_ppsqft) * 100
             )
             acc_5pct_ppsqft = (pct_errors_ppsqft < 5).mean() * 100
             acc_15pct_ppsqft = (pct_errors_ppsqft < 15).mean() * 100
@@ -216,10 +220,11 @@ class ModelTrainer:
                 sqft_clip = np.clip(sqft_val_raw, a_min=1.0, a_max=None)
                 actual_price = actual_ppsqft * sqft_clip
                 predicted_price = predicted_ppsqft * sqft_clip
+                denom_price = np.clip(actual_price, a_min=1e-3, a_max=None)
                 rmse_price = math.sqrt(mean_squared_error(actual_price, predicted_price))
                 mae_price = mean_absolute_error(actual_price, predicted_price)
                 pct_errors_price = (
-                    np.abs((actual_price - predicted_price) / actual_price) * 100
+                    np.abs((actual_price - predicted_price) / denom_price) * 100
                 )
                 acc_5pct_price = (pct_errors_price < 5).mean() * 100
                 acc_15pct_price = (pct_errors_price < 15).mean() * 100
@@ -265,14 +270,18 @@ class ModelTrainer:
                     [model(xb.to(self.device)) for xb, _, _ in val_loader]
                 ).cpu().squeeze().numpy()
 
-            actual_ppsqft = np.expm1(y_val)
+            final_preds = np.clip(final_preds, a_min=-20.0, a_max=20.0)
+            safe_y_val = np.clip(y_val, a_min=-20.0, a_max=20.0)
+
+            actual_ppsqft = np.expm1(safe_y_val)
             predicted_ppsqft = np.expm1(final_preds)
+            denom_ppsqft = np.clip(actual_ppsqft, a_min=1e-6, a_max=None)
             pct_errors_ppsqft = (
-                np.abs((actual_ppsqft - predicted_ppsqft) / actual_ppsqft) * 100
+                np.abs((actual_ppsqft - predicted_ppsqft) / denom_ppsqft) * 100
             )
 
-            final_rmse_log = math.sqrt(mean_squared_error(y_val, final_preds))
-            final_mae_log = mean_absolute_error(y_val, final_preds)
+            final_rmse_log = math.sqrt(mean_squared_error(safe_y_val, final_preds))
+            final_mae_log = mean_absolute_error(safe_y_val, final_preds)
 
             final_rmse_ppsqft = math.sqrt(
                 mean_squared_error(actual_ppsqft, predicted_ppsqft)
@@ -286,8 +295,9 @@ class ModelTrainer:
                 sqft_clip = np.clip(sqft_val_raw, a_min=1.0, a_max=None)
                 actual_price = actual_ppsqft * sqft_clip
                 predicted_price = predicted_ppsqft * sqft_clip
+                denom_price = np.clip(actual_price, a_min=1e-3, a_max=None)
                 pct_errors_price = (
-                    np.abs((actual_price - predicted_price) / actual_price) * 100
+                    np.abs((actual_price - predicted_price) / denom_price) * 100
                 )
                 final_rmse_price = math.sqrt(
                     mean_squared_error(actual_price, predicted_price)

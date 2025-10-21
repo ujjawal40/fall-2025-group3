@@ -97,4 +97,3 @@ Notes
 - All runs apply a log1p transform to the PRICE target during training where indicated, with metrics reported in both the original and transformed spaces.
 - The GLM runner defaults to the compact feature set; pass --one-hot to include expanded categorical encodings if memory allows.
 - The neural network logs indicate that despite improved hit rates, the validation accuracy still trails historical baselines; richer geospatial features and targeted loss weighting remain the top levers.
-- The neural network logs indicate that despite improved RMSE, the validation accuracy still trails historical baselines; richer geospatial features and targeted loss weighting remain the top levers.
