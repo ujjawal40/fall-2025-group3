@@ -17,6 +17,13 @@ class DataPreprocessor:
 
     dataset_path: Path | None = None
 
+    # Runtime metadata populated during feature preparation. These are helpful
+    # for downstream models that need to report or further constrain the
+    # transformed targets (e.g., clipping the reconstructed price-per-square-foot
+    # values when computing dollar-space metrics).
+    target_clip_value: float | None = None
+    target_clip_quantile: float | None = None
+
     def __post_init__(self) -> None:
         self.COLS_1A = [
             "SQFT",
@@ -250,15 +257,62 @@ class DataPreprocessor:
     # Feature preparation
     # ------------------------------------------------------------------
     def prepare_features(
-        self, df: pd.DataFrame, *, target: str = "LOG_PPSQFT"
+        self,
+        df: pd.DataFrame,
+        *,
+        target: str = "LOG_PPSQFT",
+        clip_ppsqft_quantile: float | None = 0.995,
+        max_ppsqft: float | None = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare feature matrix and target vector using the cleaned frame."""
+        """Prepare the feature matrix and target vector.
+
+        Parameters
+        ----------
+        df:
+            Cleaned dataframe returned by :meth:`clean_and_engineer`.
+        target:
+            Either ``"LOG_PPSQFT"`` (default) or ``"PRICE"``.
+        clip_ppsqft_quantile:
+            Upper quantile used to cap price-per-square-foot outliers. Set to
+            ``None`` to disable percentile clipping entirely.
+        max_ppsqft:
+            Absolute ceiling applied after the quantile clip. Useful when an
+            application-defined limit (e.g., $2,000 per sqft) is preferred.
+        """
 
         df = df[(df["PRICE"] > 0) & (df["SQFT"] > 0)].copy()
         if df.empty:
             raise ValueError("No rows remain after filtering invalid PRICE/SQFT values.")
 
         df["PPSQFT"] = df["PRICE"] / df["SQFT"].clip(lower=1)
+
+        # Clip extreme price-per-square-foot outliers to stabilise downstream
+        # models. The default behaviour trims values above the 99.5th percentile,
+        # though callers can opt out (``clip_ppsqft_quantile=None``) or specify an
+        # absolute ceiling via ``max_ppsqft``. We persist the derived clip value
+        # so training scripts can mirror the same bounds when reporting metrics.
+        clip_value: float | None = None
+        valid_ppsqft = df["PPSQFT"].replace([np.inf, -np.inf], np.nan).dropna()
+        if not valid_ppsqft.empty:
+            if clip_ppsqft_quantile is not None:
+                quantile = float(np.clip(clip_ppsqft_quantile, 0.0, 1.0))
+                clip_value = float(valid_ppsqft.quantile(quantile))
+
+            if max_ppsqft is not None:
+                clip_value = (
+                    float(min(clip_value, max_ppsqft))
+                    if clip_value is not None
+                    else float(max_ppsqft)
+                )
+
+        if clip_value is not None and np.isfinite(clip_value):
+            df["PPSQFT"] = df["PPSQFT"].clip(upper=clip_value)
+            self.target_clip_value = clip_value
+            self.target_clip_quantile = clip_ppsqft_quantile
+        else:
+            self.target_clip_value = None
+            self.target_clip_quantile = None
+
         df["LOG_PPSQFT"] = np.log1p(df["PPSQFT"])
 
         df = df[np.isfinite(df["LOG_PPSQFT"])].copy()

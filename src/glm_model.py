@@ -304,6 +304,17 @@ def _prepare_dataset(
     for name in feature_names:
         print(f"  - {name}")
 
+    if preprocessor.target_clip_value is not None:
+        quant_msg = (
+            f" (quantile={preprocessor.target_clip_quantile:.3f})"
+            if preprocessor.target_clip_quantile is not None
+            else ""
+        )
+        print(
+            "Applied price-per-square-foot clip at "
+            f"${preprocessor.target_clip_value:,.2f}{quant_msg}"
+        )
+
     return X, y, feature_names
 
 

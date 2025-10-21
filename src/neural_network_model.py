@@ -59,6 +59,7 @@ class ModelTrainer:
         hidden_layers: tuple = (128, 64, 32),
         dropout_prob: float = 0.2,
         verbose: bool = True,
+        target_clip_value: Optional[float] = None,
     ) -> Tuple[nn.Module, Dict[str, Any], StandardScaler, np.ndarray]:
         """Train the neural network model."""
 
@@ -205,6 +206,10 @@ class ModelTrainer:
             # Calculate percentage accuracy metrics in price-per-square-foot space
             actual_ppsqft = np.expm1(safe_y_val)
             predicted_ppsqft = np.expm1(preds)
+            if target_clip_value is not None:
+                clip_upper = float(target_clip_value)
+                actual_ppsqft = np.clip(actual_ppsqft, 0.0, clip_upper)
+                predicted_ppsqft = np.clip(predicted_ppsqft, 0.0, clip_upper)
             denom_ppsqft = np.clip(actual_ppsqft, a_min=1e-6, a_max=None)
             pct_errors_ppsqft = (
                 np.abs((actual_ppsqft - predicted_ppsqft) / denom_ppsqft) * 100
@@ -275,6 +280,10 @@ class ModelTrainer:
 
             actual_ppsqft = np.expm1(safe_y_val)
             predicted_ppsqft = np.expm1(final_preds)
+            if target_clip_value is not None:
+                clip_upper = float(target_clip_value)
+                actual_ppsqft = np.clip(actual_ppsqft, 0.0, clip_upper)
+                predicted_ppsqft = np.clip(predicted_ppsqft, 0.0, clip_upper)
             denom_ppsqft = np.clip(actual_ppsqft, a_min=1e-6, a_max=None)
             pct_errors_ppsqft = (
                 np.abs((actual_ppsqft - predicted_ppsqft) / denom_ppsqft) * 100
@@ -378,11 +387,22 @@ def main():
     X, y, feature_names = preprocessor.prepare_features(clean_df)
     print(f"Feature matrix shape: {X.shape}")
     print(f"Target shape: {y.shape}")
-    
+    if preprocessor.target_clip_value is not None:
+        quantile_msg = (
+            f" (quantile={preprocessor.target_clip_quantile:.3f})"
+            if preprocessor.target_clip_quantile is not None
+            else ""
+        )
+        print(
+            "Applied price-per-square-foot clip at "
+            f"${preprocessor.target_clip_value:,.2f}{quantile_msg}"
+        )
+
     # Train model
     print("\n4. Training neural network model...")
     model, history, scaler, feat_names = trainer.train_model(
         X, y, feature_names,
+        target_clip_value=preprocessor.target_clip_value,
         n_epochs=160,
         batch_size=256,
         lr=5e-4,

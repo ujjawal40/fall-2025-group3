@@ -13,6 +13,10 @@
   out of memory on local machines: `--max-rows 10000` or lower keeps preprocessing and
   histogram boosting within a few gigabytes of RAM. The scripts sample **before** one-hot
   encoding so the feature matrix is reduced accordingly.
+- All preprocessing flows now clip price-per-square-foot outliers at roughly the 99.5th
+  percentile before taking logarithms. This keeps downstream models numerically stable.
+  Pass `clip_ppsqft_quantile=None` to `DataPreprocessor.prepare_features` if you need the
+  raw distribution without trimming.
 - The GLM runner leaves one-hot encoding disabled by default to mirror the neural
   network workflow. Pass `--one-hot` if you need categorical dummies and have enough
   memory; otherwise the compact feature set is safer for dense linear models.

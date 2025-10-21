@@ -40,7 +40,7 @@ Validation metrics (log1p target):
 Neural Network (Intrinsic MLP)
 ------------------------------
 Command: python src/neural_network_model.py
-Key adjustments: re-enabled location-aware one-hot encodings (capped at the 50 most frequent categories), widened the MLP stack with dropout (0.25), used AdamW (lr=5e-4, weight decay=5e-4) under an 8-epoch warmup plus cosine decay schedule, introduced price-weighted mini-batches, and activated early stopping with patience 20. The pipeline now consumes the full 100,000 cleaned rows instead of subsampling so the neural net trains on the same coverage as the XGBoost and GLM baselines. The trainer now also reports metrics in both price-per-square-foot and total-price space.
+Key adjustments: re-enabled location-aware one-hot encodings (capped at the 50 most frequent categories), widened the MLP stack with dropout (0.25), used AdamW (lr=5e-4, weight decay=5e-4) under an 8-epoch warmup plus cosine decay schedule, introduced price-weighted mini-batches, and activated early stopping with patience 20. The pipeline now consumes the full 100,000 cleaned rows instead of subsampling so the neural net trains on the same coverage as the XGBoost and GLM baselines. A new 99.5th-percentile clip on price-per-square-foot outliers keeps the log target and reconstructed dollar metrics numerically stable, and the trainer mirrors that ceiling when reporting both price-per-square-foot and total-price errors.
 
 Training behaviour snapshot:
   - With the full dataset, validation RMSE dipped to 0.3064 (log $/sqft) by epoch 66 before early stopping triggered; the scheduler’s cosine decay kept the learning rate near 3.5e-4 at that point.
