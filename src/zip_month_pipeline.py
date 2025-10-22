@@ -608,7 +608,7 @@ class ZipMonthIndexBuilder:
     def _apply_min_activity_filter(self, base: pd.DataFrame) -> pd.DataFrame:
         """Drop ZIP×month rows with too few sold/list events to be reliable."""
 
-        if self.min_sold <= 0 and self.min_list <= 0:
+        if base.empty:
             return base
 
         events = base.copy()
@@ -622,20 +622,66 @@ class ZipMonthIndexBuilder:
             .sum()
             .rename(columns={"_sold": "N_SOLD", "_list": "N_LIST"})
         )
-        valid = counts[
-            (counts["N_SOLD"] >= self.min_sold)
-            | (counts["N_LIST"] >= self.min_list)
-        ][["ZIPCODE", "YM"]]
-        if valid.empty:
+
+        if counts.empty:
             return base
 
+        def _filter(th_sold: int, th_list: int) -> pd.DataFrame:
+            """Return events filtered to thresholds, handling zero thresholds."""
+
+            if th_sold <= 0 and th_list <= 0:
+                return events
+
+            mask = None
+            if th_sold > 0:
+                mask = counts["N_SOLD"] >= th_sold
+            if th_list > 0:
+                list_mask_local = counts["N_LIST"] >= th_list
+                mask = list_mask_local if mask is None else (mask | list_mask_local)
+            valid_pairs = counts.loc[mask, ["ZIPCODE", "YM"]] if mask is not None else counts[["ZIPCODE", "YM"]]
+            if valid_pairs.empty:
+                return events.iloc[0:0]
+            return events.merge(valid_pairs, on=["ZIPCODE", "YM"], how="inner")
+
         before = base[["ZIPCODE", "YM"]].drop_duplicates().shape[0]
-        filtered = base.merge(valid, on=["ZIPCODE", "YM"], how="inner")
+        if before == 0:
+            return base
+
+        target_min = max(50, int(before * 0.3))
+        thr_sold = max(int(self.min_sold), 0)
+        thr_list = max(int(self.min_list), 0)
+        attempts = 0
+        filtered = _filter(thr_sold, thr_list)
         after = filtered[["ZIPCODE", "YM"]].drop_duplicates().shape[0]
+
+        while after < target_min and (thr_sold > 1 or thr_list > 1):
+            attempts += 1
+            new_thr_sold = thr_sold if thr_sold <= 1 else max(1, thr_sold // 2)
+            new_thr_list = thr_list if thr_list <= 1 else max(1, thr_list // 2)
+            if new_thr_sold == thr_sold and new_thr_list == thr_list:
+                break
+            thr_sold, thr_list = new_thr_sold, new_thr_list
+            filtered = _filter(thr_sold, thr_list)
+            after = filtered[["ZIPCODE", "YM"]].drop_duplicates().shape[0]
+            if attempts > 6:
+                break
+
+        if after == 0:
+            print("ZipMonthIndexBuilder: activity filter removed all rows; skipping filter.")
+            return base
+
+        if after < target_min and (thr_sold <= 1 and thr_list <= 1):
+            # Still too few rows even at the minimum thresholds → fall back to no filtering.
+            print(
+                "ZipMonthIndexBuilder: activity filter kept fewer than "
+                f"{target_min} ZIP×YM rows even at minimal thresholds; retaining all rows."
+            )
+            return base
+
         if after < before:
             print(
                 "ZipMonthIndexBuilder: filtered ZIP×YM rows for low activity "
-                f"({before} → {after})"
+                f"({before} → {after}) using thresholds N_SOLD>={thr_sold}, N_LIST>={thr_list}"
             )
         return filtered
 
