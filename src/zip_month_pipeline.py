@@ -598,10 +598,46 @@ class ZipMonthIndexBuilder:
                 f"{missing}. Available columns: {available}"
             )
         base = self.ce[self.ce["EVT_IS_RENTAL"] == 0].copy()
+        base["EVT_TYPE"] = base["EVT_TYPE"].astype(str).str.lower()
         base["EVT_DAY"] = _ensure_datetime(base["EVT_DATE"]).dt.date
         base["YM"] = _ensure_datetime(base["EVT_DATE"]).dt.to_period("M").dt.to_timestamp()
         base = base[base["EVT_DAY"] >= pd.to_datetime(MIN_START_DATE).date()]
+        base = self._apply_min_activity_filter(base)
         return base
+
+    def _apply_min_activity_filter(self, base: pd.DataFrame) -> pd.DataFrame:
+        """Drop ZIP×month rows with too few sold/list events to be reliable."""
+
+        if self.min_sold <= 0 and self.min_list <= 0:
+            return base
+
+        events = base.copy()
+        sold_mask = events["EVT_TYPE"].eq("sold")
+        list_mask = events["EVT_TYPE"].isin(
+            ["listed for sale", "price change", "price increased", "price reduced"]
+        )
+        counts = (
+            events.assign(_sold=sold_mask.astype(int), _list=list_mask.astype(int))
+            .groupby(["ZIPCODE", "YM"], as_index=False)[["_sold", "_list"]]
+            .sum()
+            .rename(columns={"_sold": "N_SOLD", "_list": "N_LIST"})
+        )
+        valid = counts[
+            (counts["N_SOLD"] >= self.min_sold)
+            | (counts["N_LIST"] >= self.min_list)
+        ][["ZIPCODE", "YM"]]
+        if valid.empty:
+            return base
+
+        before = base[["ZIPCODE", "YM"]].drop_duplicates().shape[0]
+        filtered = base.merge(valid, on=["ZIPCODE", "YM"], how="inner")
+        after = filtered[["ZIPCODE", "YM"]].drop_duplicates().shape[0]
+        if after < before:
+            print(
+                "ZipMonthIndexBuilder: filtered ZIP×YM rows for low activity "
+                f"({before} → {after})"
+            )
+        return filtered
 
     def _filter_extreme_values(self, base: pd.DataFrame) -> pd.DataFrame:
         filtered = base.copy()
@@ -676,6 +712,7 @@ class ZipMonthIndexBuilder:
         idx["w_sold"] = w_sold.fillna(0)
         idx["IDX"] = idx.apply(_blend, axis=1)
         idx = idx.drop(columns=["w_sold"])
+        idx = idx[idx["IDX"].notna()].copy()
         return idx
 
     def _msa_state_baselines(self, idx_zip: pd.DataFrame) -> pd.DataFrame:
@@ -796,6 +833,22 @@ class ZipIndexFeatureizer:
         feats["LIQ_LOG"] = np.log1p(feats["N_SOLD_SAFE"])
         feats["AFFORD_X_MORT_D12"] = feats["AFFORD_RATIO"] * feats["MORTGAGE_D12"]
         feats["MOM6_X_UNEMP_D12"] = feats["IDX_MOM_6"] * feats["UNEMP_D12"]
+        state_baseline = feats.get("STATE_IDX_BLEND")
+        if state_baseline is not None:
+            denom = state_baseline.replace({0: np.nan})
+            feats["IDX_TO_STATE"] = feats["IDX"] / denom
+            feats["IDX_MINUS_STATE"] = feats["IDX"] - state_baseline
+        else:
+            feats["IDX_TO_STATE"] = np.nan
+            feats["IDX_MINUS_STATE"] = np.nan
+        msa_baseline = feats.get("MSA_IDX_BLEND")
+        if msa_baseline is not None:
+            denom = msa_baseline.replace({0: np.nan})
+            feats["IDX_TO_MSA"] = feats["IDX"] / denom
+            feats["IDX_MINUS_MSA"] = feats["IDX"] - msa_baseline
+        else:
+            feats["IDX_TO_MSA"] = np.nan
+            feats["IDX_MINUS_MSA"] = np.nan
         feats["IDX_FUTURE_H1"] = group["IDX"].shift(-1)
         feats["IDX_FUTURE_H2"] = group["IDX"].shift(-2)
         feats["Y_H1"] = np.log1p(feats["IDX_FUTURE_H1"]) - np.log1p(feats["IDX"])
@@ -950,11 +1003,16 @@ def run_pipeline(raw_table: Path = RAW_TABLE_PATH) -> None:
         inf_counts = {col: int(np.isinf(df[col]).sum()) for col in feat_cols if np.isinf(df[col]).any()}
         if inf_counts:
             print(f"Replacing inf/-inf values in feature columns: {inf_counts}")
-        df[feat_cols] = (
-            df[feat_cols]
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0.0)
-        )
+        df[feat_cols] = df[feat_cols].replace([np.inf, -np.inf], np.nan)
+        train_subset = df.loc[trn_mask, feat_cols]
+        if not train_subset.empty:
+            lower = train_subset.quantile(0.01)
+            upper = train_subset.quantile(0.99)
+            df[feat_cols] = df[feat_cols].clip(lower=lower, upper=upper, axis=1)
+            fill_values = train_subset.mean().fillna(0.0)
+        else:
+            fill_values = {col: 0.0 for col in feat_cols}
+        df[feat_cols] = df[feat_cols].fillna(fill_values)
     feat_cols = [c for c in feat_cols if df.loc[trn_mask, c].nunique() > 1]
     print(f"Pre-prune features: {len(feat_cols)}")
     boost_feats = {
