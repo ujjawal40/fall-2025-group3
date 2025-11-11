@@ -445,6 +445,13 @@ def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
 if __name__ == "__main__":
     # 1) load + preprocess
     X_param, y, extras = load_with_preprocessor()
+    print(f"parametric X shape: {X_param.shape}, y shape: {y.shape}")
+
+    # 2) build a NaN-safe surface feature matrix
+    spatial = extras.get("spatial")
+    if spatial is not None and spatial.size > 0:
+        # start from spatial bundle (LATITUDE, LONGITUDE, ZIPCODE, FIPS, ...)
+        X_surface = spatial.astype(np.float32).copy()
 
     # 2) choose surface space
     if extras["spatial"] is not None:
