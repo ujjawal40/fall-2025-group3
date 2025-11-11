@@ -523,6 +523,57 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.savefig("em_loss.png", dpi=150)
 
-    # example prediction on training itself
-    preds = trainer.predict(X_np[:10])
-    print("sample preds:", preds[:5])
+    # 9b) M-step losses per EM
+    if "train_losses_per_iter" in history and history["train_losses_per_iter"]:
+        plt.figure(figsize=(6, 4))
+        for i, losses in enumerate(history["train_losses_per_iter"]):
+            plt.plot(losses, label=f"EM {i+1}")
+        plt.title("M-step (NN) losses per EM")
+        plt.xlabel("epoch")
+        plt.ylabel("loss")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig("mstep_losses.png", dpi=150)
+
+    # 9c) predicted vs true
+    plt.figure(figsize=(6, 6))
+    plt.scatter(y_true, y_pred, s=4)
+    mn, mx = y_true.min(), y_true.max()
+    plt.plot([mn, mx], [mn, mx], color="red")
+    plt.title("Predicted vs True Price")
+    plt.xlabel("True price")
+    plt.ylabel("Predicted price")
+    plt.tight_layout()
+    plt.savefig("pred_vs_true.png", dpi=150)
+
+    # 9d) abs relative error hist
+    plt.figure(figsize=(6, 4))
+    plt.hist(abs_rel, bins=50)
+    plt.title("Absolute Relative Error")
+    plt.xlabel("abs_rel")
+    plt.ylabel("count")
+    plt.tight_layout()
+    plt.savefig("abs_rel_hist.png", dpi=150)
+
+    # 9e) optional desirability map if we have lat/lon
+    if extras.get("spatial") is not None and "LATITUDE" in spatial_cols and "LONGITUDE" in spatial_cols:
+        lat_idx = spatial_cols.index("LATITUDE")
+        lon_idx = spatial_cols.index("LONGITUDE")
+        coords = extras["spatial"]
+        plt.figure(figsize=(7, 5))
+        sc = plt.scatter(
+            coords[:, lon_idx],
+            coords[:, lat_idx],
+            c=trainer.D,
+            s=5,
+            cmap="viridis",
+            alpha=0.6,
+        )
+        plt.colorbar(sc, label="desirability (D)")
+        plt.title("Learned desirability field")
+        plt.xlabel("Longitude")
+        plt.ylabel("Latitude")
+        plt.tight_layout()
+        plt.savefig("desirability.png", dpi=150)
+
