@@ -123,7 +123,7 @@ class DataPreprocessor:
                 resolved_path = candidate
                 break
 
-        if resolved is None:
+        if resolved_path is None:
             raise FileNotFoundError(f"File not found: {requested}")
 
         df = pd.read_csv(resolved)
