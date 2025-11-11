@@ -109,6 +109,17 @@ class BaseDesirabilitySurface:
         """
         raise NotImplementedError
 
+    # helper for prediction time
+    def interpolate_one(self, x_new: np.ndarray, D: np.ndarray) -> float:
+        """
+        Simple kernel interpolation of D for a *new* point x_new
+        using training X as support.
+        """
+        d2 = np.sum((self.X - x_new) ** 2, axis=1)
+        neigh_idx = np.argsort(d2)[: self.K]
+        w = np.exp(-self.q * d2[neigh_idx])
+        w = w / (w.sum() + 1e-12)
+        return float(np.dot(w, D[neigh_idx]))
 
 # ----------------------------
 # 2a. KERNEL-BASED VERSION
