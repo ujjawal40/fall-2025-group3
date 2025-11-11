@@ -383,6 +383,11 @@ class LMETrainer:
         preds = np.array(preds)
         return m_new + preds
 
+        h_new = []
+        for x in surf_X_new:
+            h_new.append(self.surface.interpolate_one(x, self.D))
+        h_new = np.array(h_new, dtype=np.float32)
+        return m_new + h_new
 
 # ----------------------------
 # 5. DATA LOADING
