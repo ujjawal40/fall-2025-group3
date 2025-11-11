@@ -248,6 +248,7 @@ class LMETrainer:
 
         self.model = model.to(device)
         self.surface = surface
+        self.model = model.to(device)
         self.reg_r = reg_r
         self.device = device
 
