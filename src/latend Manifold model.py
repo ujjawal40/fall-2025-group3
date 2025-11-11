@@ -427,8 +427,16 @@ def prepare_xy(
     else:
         y = y_raw
 
-    # drop target from features
-    X = df.drop(columns=[target_name]).to_numpy().astype(np.float64)
+    pre = DataPreprocessor(dataset_path=csv_path)
+    raw_df = pre.load_data()               # raw CSV
+    clean_df = pre.clean_and_engineer(raw_df)
+    clean_df = clean_df.sample(n=10000, random_state = 42)
+    X_param, y, feature_names, extras = pre.prepare_features(
+        clean_df,
+        target="LOG_PRICE",  # match your Snowflake LME which log-priced
+        clip_ppsqft_quantile=0.995,
+    )
+    return X_param, y, extras
 
     # simple standardization
     mean = X.mean(axis=0, keepdims=True)
