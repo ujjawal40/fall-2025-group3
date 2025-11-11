@@ -437,8 +437,21 @@ def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
 # 6. MAIN (example)
 # ----------------------------
 if __name__ == "__main__":
-    df = load_sub_sample()
-    X_np, y_np = prepare_xy(df)
+    # 1) load + preprocess
+    X_param, y, extras = load_with_preprocessor()
+
+    # 2) choose surface space
+    if extras["spatial"] is not None:
+        X_surface = extras["spatial"]
+        # basic standardization for distances
+        mean = X_surface.mean(axis=0, keepdims=True)
+        std = X_surface.std(axis=0, keepdims=True) + 1e-9
+        X_surface_std = (X_surface - mean) / std
+    else:
+        # fallback to parametric features for distance
+        mean = X_param.mean(axis=0, keepdims=True)
+        std = X_param.std(axis=0, keepdims=True) + 1e-9
+        X_surface_std = (X_param - mean) / std
 
     # choose which H(D, x) to use:
     # surface = KernelDesirabilitySurface(X_np, K=13, q=1.0)
