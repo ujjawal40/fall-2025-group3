@@ -389,10 +389,17 @@ class LMETrainer:
         h_new = np.array(h_new, dtype=np.float32)
         return m_new + h_new
 
-# ----------------------------
-# 5. DATA LOADING
-# ----------------------------
-def load_sub_sample() -> pd.DataFrame:
+
+# ========================================================
+# 5. DATA LOADING VIA OUR PREPROCESSOR
+# ========================================================
+def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Find the CSV, run Snowflake-like preprocessing, and return:
+      - X_param  (for NN)
+      - y        (log-price)
+      - extras   (zpid, spatial, etc.)
+    """
     candidate_paths = [
         "src/data/sub_sample.csv",
         "data/src/sub_sample.csv",
