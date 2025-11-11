@@ -457,7 +457,10 @@ if __name__ == "__main__":
     # surface = KernelDesirabilitySurface(X_surface_std, K=20, q=1.0)
     surface = LLRDesirabilitySurface(X_surface_std, K=20, q=1.0)
 
-    model = IntrinsicPriceNet(in_dim=X_np.shape[1])
+    # 4) build parametric model
+    model = IntrinsicPriceNet(in_dim=X_param.shape[1])
+
+    # 5) trainer
     trainer = LMETrainer(
         X_np=X_np,
         y_np=y_np,
