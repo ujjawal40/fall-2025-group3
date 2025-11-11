@@ -409,19 +409,7 @@ def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     csv_path = None
     for p in candidate_paths:
         if os.path.exists(p):
-            return pd.read_csv(p)
-    raise FileNotFoundError("Could not find sub_sample.csv in expected locations.")
-
-
-def prepare_xy(
-    df: pd.DataFrame,
-    target_cols: List[str] = ("log_price", "price", "SalePrice"),
-) -> Tuple[np.ndarray, np.ndarray]:
-    # find target
-    target_name = None
-    for c in target_cols:
-        if c in df.columns:
-            target_name = c
+            csv_path = p
             break
     if target_name is None:
         # fallback: last column
