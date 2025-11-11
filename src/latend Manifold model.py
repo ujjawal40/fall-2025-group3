@@ -411,16 +411,8 @@ def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         if os.path.exists(p):
             csv_path = p
             break
-    if target_name is None:
-        # fallback: last column
-        target_name = df.columns[-1]
-
-    y_raw = df[target_name].to_numpy().astype(np.float64)
-    # log if named "price"
-    if target_name.lower() in ("price", "saleprice"):
-        y = np.log(y_raw + 1e-9)
-    else:
-        y = y_raw
+    if csv_path is None:
+        raise FileNotFoundError("Could not find sub_sample.csv in expected locations.")
 
     pre = DataPreprocessor(dataset_path=csv_path)
     raw_df = pre.load_data()               # raw CSV
