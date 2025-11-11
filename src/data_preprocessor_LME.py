@@ -117,10 +117,10 @@ class DataPreprocessor:
                 ]
             )
 
-        resolved: Path | None = None
-        for cand in search_roots:
-            if cand.is_file():
-                resolved = cand
+        resolved_path: Path | None = None
+        for candidate in search_roots:
+            if candidate.is_file():
+                resolved_path = candidate
                 break
 
         if resolved is None:
