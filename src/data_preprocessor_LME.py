@@ -313,6 +313,9 @@ class DataPreprocessor:
     ) -> pd.DataFrame:
         df = df.copy()
 
+        if "PRICEHISTORY" in df.columns and len(df) <= 20000:
+            df =self._price_history_agg(df)
+
         # 0) try to derive price-history features if present
         df = self._price_history_agg(df)
 
