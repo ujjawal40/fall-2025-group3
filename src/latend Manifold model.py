@@ -325,16 +325,12 @@ class LMETrainer:
                 loss.backward()
                 optim.step()
 
-    def fit(
-        self,
-        outer_iters: int = 5,
-        llr: bool = False,
-    ):
-        """
-        outer_iters: number of EM-like passes
-        """
-        X_t = torch.from_numpy(self.X_np).float().to(self.device)
-        y_t = torch.from_numpy(self.y_np).float().to(self.device)
+                start = end  # move window
+
+    # ------------------ Outer loop ------------------
+    def fit(self, outer_iters: int = 4):
+        X_t = torch.from_numpy(self.X_param).float().to(self.device)
+        y_t = torch.from_numpy(self.y).float().to(self.device)
 
         for it in range(outer_iters):
             # 1) build U_i from current surface definition
