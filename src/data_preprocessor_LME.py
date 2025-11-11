@@ -96,7 +96,10 @@ class DataPreprocessor:
     # loading
     # ------------------------------------------------------------------
     def load_data(self, file_path: str | Path | None = None) -> pd.DataFrame:
-        requested = Path(file_path) if file_path is not None else self.dataset_path
+        """Load the CSV dataset and report its shape."""
+
+        # accept str, Path, or use the one from init
+        requested = file_path if file_path is not None else self.dataset_path
         if requested is None:
             raise ValueError("A dataset path must be provided before loading data.")
 
