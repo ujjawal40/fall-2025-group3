@@ -453,9 +453,9 @@ if __name__ == "__main__":
         std = X_param.std(axis=0, keepdims=True) + 1e-9
         X_surface_std = (X_param - mean) / std
 
-    # choose which H(D, x) to use:
-    # surface = KernelDesirabilitySurface(X_np, K=13, q=1.0)
-    surface = LLRDesirabilitySurface(X_np, K=20, q=1.0)
+    # 3) build surface (kernel or LLR)
+    # surface = KernelDesirabilitySurface(X_surface_std, K=20, q=1.0)
+    surface = LLRDesirabilitySurface(X_surface_std, K=20, q=1.0)
 
     model = IntrinsicPriceNet(in_dim=X_np.shape[1])
     trainer = LMETrainer(
