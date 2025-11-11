@@ -295,8 +295,9 @@ class LMETrainer:
         epochs: int = 5,
         lr: float = 1e-3,
     ):
-        dataset = TensorDataset(X_torch, y_torch)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        dataset = TensorDataset(X_t, y_t)
+        # IMPORTANT: keep shuffle=False so we can slice h_all by position
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
         optim = torch.optim.Adam(self.model.parameters(), lr=lr)
 
