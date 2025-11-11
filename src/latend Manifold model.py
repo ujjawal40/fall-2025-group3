@@ -50,6 +50,13 @@ class IntrinsicPriceNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze(-1)  # (batch,) not (batch,1)
 
+# ========================================================
+# 2. NON-PARAMETRIC SURFACES
+# ========================================================
+# ========================================================
+# 2. NON-PARAMETRIC SURFACES (KD-tree version)
+# ========================================================
+ # make sure scikit-learn is installed
 
 # ----------------------------
 # 2. NON-PARAMETRIC BASE
