@@ -126,10 +126,12 @@ class DataPreprocessor:
         if resolved_path is None:
             raise FileNotFoundError(f"File not found: {requested}")
 
-        df = pd.read_csv(resolved)
-        self.dataset_path = resolved
-        if resolved != requested:
-            print(f"Resolved dataset path to: {resolved}")
+        df = pd.read_csv(resolved_path)
+        self.dataset_path = resolved_path
+
+        if resolved_path != requested:
+            print(f"Resolved dataset path to: {resolved_path}")
+
         print(f"Loaded data shape: {df.shape}")
         return df
 
