@@ -27,6 +27,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from src.data_preprocessor import DataPreprocessor  # both in src/
 
 # ----------------------------
 # 1. PARAMETRIC COMPONENT
