@@ -455,6 +455,7 @@ if __name__ == "__main__":
         y_np=y_np,
         model=model,
         surface=surface,
+        model=model,
         reg_r=1e-2,
         device="cpu",
     )
