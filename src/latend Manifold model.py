@@ -458,6 +458,7 @@ if __name__ == "__main__":
         model=model,
         reg_r=1e-2,
         device="cpu",
+        zpid=extras.get("zpid"),
     )
 
     # run a few EM iterations
