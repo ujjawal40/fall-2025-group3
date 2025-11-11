@@ -399,6 +399,7 @@ def load_sub_sample() -> pd.DataFrame:
         "data/sub_sample.csv",
         "sub_sample.csv",
     ]
+    csv_path = None
     for p in candidate_paths:
         if os.path.exists(p):
             return pd.read_csv(p)
