@@ -240,6 +240,7 @@ class LMETrainer:
         model: IntrinsicPriceNet,
         reg_r: float = 1e-2,
         device: str = "cpu",
+        zpid: Optional[np.ndarray] = None,
     ):
         self.X_np = X_np
         self.y_np = y_np
