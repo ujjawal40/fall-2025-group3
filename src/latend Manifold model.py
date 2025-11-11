@@ -485,8 +485,43 @@ if __name__ == "__main__":
         zpid=extras.get("zpid"),
     )
 
-    # run a few EM iterations
-    trainer.fit(outer_iters=3)
+    # 7) run EM (and get history back)
+    history = trainer.fit(outer_iters=3)
+
+    # 8) evaluate on the same 10k (since we sampled)
+    y_pred_log = trainer.predict(
+        X_new=X_param,
+        surf_X_new=X_surface_std,
+    )
+
+    # convert back to price to compute relative errors
+    y_true = np.exp(y)
+    y_pred = np.exp(y_pred_log)
+
+    abs_rel = np.abs(y_pred - y_true) / y_true
+    within_5 = (abs_rel < 0.05).mean()
+    within_10 = (abs_rel < 0.10).mean()
+    within_15 = (abs_rel < 0.15).mean()
+    med_err = np.median(abs_rel)
+
+    print("\n=== Paper-style metrics ===")
+    print(f"within 5%:  {within_5:.4f}")
+    print(f"within 10%: {within_10:.4f}")
+    print(f"within 15%: {within_15:.4f}")
+    print(f"median abs rel: {med_err:.4f}")
+
+    # 9) plots like notebook — save to files (headless friendly)
+
+    # 9a) EM loss curve
+    if "em_losses" in history and history["em_losses"]:
+        plt.figure(figsize=(6, 4))
+        plt.plot(history["em_losses"], marker="o")
+        plt.title("EM iteration loss")
+        plt.xlabel("EM iteration")
+        plt.ylabel("loss")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig("em_loss.png", dpi=150)
 
     # example prediction on training itself
     preds = trainer.predict(X_np[:10])
