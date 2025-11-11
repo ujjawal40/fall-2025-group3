@@ -15,6 +15,8 @@
 # You can run:  python -m src.lme_model
 # after adjusting paths/column names.
 # --------------------------------------------------------
+from __future__ import annotations
+
 import os
 from typing import List, Tuple, Optional, Literal, Dict
 
