@@ -100,6 +100,11 @@ class DataPreprocessor:
         if requested is None:
             raise ValueError("A dataset path must be provided before loading data.")
 
+
+        if not isinstance(requested, Path):
+            requested = Path(requested)
+
+       
         search_roots = []
         if requested.is_absolute():
             search_roots.append(requested)
