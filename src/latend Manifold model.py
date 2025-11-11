@@ -288,8 +288,8 @@ class LMETrainer:
     # ---------- Phase 2: update W (parametric) ----------
     def _update_W(
         self,
-        X_torch: torch.Tensor,
-        y_torch: torch.Tensor,
+        X_t: torch.Tensor,
+        y_t: torch.Tensor,
         U_list: List[Tuple[np.ndarray, np.ndarray]],
         batch_size: int = 64,
         epochs: int = 5,
