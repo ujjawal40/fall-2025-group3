@@ -359,8 +359,10 @@ class LMETrainer:
 
     def predict(self, X_new: np.ndarray) -> np.ndarray:
         """
-        For now, just do parametric prediction + kernel interpolation
-        w.r.t. **training** desirabilities.
+        Predict on new rows.
+        - X_new: parametric features (same as training X_param)
+        - surf_X_new: surface features (e.g. lat/lon) for new rows;
+                      if None, we fall back to using X_new in surface space.
         """
         self.model.eval()
         with torch.no_grad():
