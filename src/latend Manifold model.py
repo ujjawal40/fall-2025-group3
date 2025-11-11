@@ -352,10 +352,10 @@ class LMETrainer:
             # build h_i for train set and print loss
             h_np = np.zeros(self.n, dtype=np.float64)
             for i, (idxs, weights) in enumerate(U_list):
-                h_np[i] = np.dot(weights, self.D[idxs])
-            preds = m_t2 + h_np
-            mse = 0.5 * np.mean((self.y_np - preds) ** 2)
-            print(f"[outer {it+1}] training energy = {mse:.6f}")
+                h_np[i] = np.dot(self.D[idxs], weights)
+            preds = m_np2 + h_np
+            energy = 0.5 * np.mean((self.y - preds) ** 2)
+            print(f"[outer {it+1}] training energy = {energy:.6f}")
 
     def predict(self, X_new: np.ndarray) -> np.ndarray:
         """
