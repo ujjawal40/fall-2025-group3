@@ -281,6 +281,19 @@ class DataPreprocessor:
             df["ph_days_since_change"] = np.nan
 
         return df
+    @staticmethod
+    def num_from_text(series: pd.Series, allow_comma: bool = True) -> pd.Series:
+        """
+        Extract the first number from a text-y series like "3 bd" or "1,234 sqft".
+        This is the same helper we used earlier.
+        """
+        pattern = r"([-+]?\d[\d,]*\.?\d*)"
+        cleaned = series.astype(str).str.extract(pattern, expand=False)
+
+        if allow_comma:
+            cleaned = cleaned.str.replace(",", "", regex=False)
+
+        return pd.to_numeric(cleaned, errors="coerce")
 
     # ------------------------------------------------------------------
     # main clean + engineer
