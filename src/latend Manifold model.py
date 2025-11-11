@@ -237,6 +237,7 @@ class LMETrainer:
         y_np: np.ndarray,
         model: IntrinsicPriceNet,
         surface: BaseDesirabilitySurface,
+        model: IntrinsicPriceNet,
         reg_r: float = 1e-2,
         device: str = "cpu",
     ):
