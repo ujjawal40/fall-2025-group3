@@ -438,6 +438,7 @@ def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
 
     return X_std, y
 
+    return X_param_std, y, extras
 
 # ----------------------------
 # 6. MAIN (example)
