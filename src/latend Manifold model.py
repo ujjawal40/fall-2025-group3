@@ -449,9 +449,77 @@ def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
 
     return X_param_std, y, extras
 
-# ----------------------------
-# 6. MAIN (example)
-# ----------------------------
+
+# ========================================================
+# 5b. SPATIAL TRAIN/TEST SPLIT
+# ========================================================
+def spatial_train_test_split(
+    spatial: np.ndarray,
+    test_frac: float = 0.2,
+    min_cells: int = 30,
+    random_state: int = 42,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Simple spatial split:
+    - bin lat/lon into a grid
+    - pick cells for test until we hit ~test_frac
+    If everything collapses into one cell (common!), we fall back to random split.
+    """
+    rng = np.random.default_rng(random_state)
+
+    n, d = spatial.shape
+    if d < 2:
+        # caller will probably fallback anyway
+        idx = np.arange(n)
+        rng.shuffle(idx)
+        cut = int(test_frac * n)
+        return idx[cut:], idx[:cut]
+
+    lat = spatial[:, 0]
+    lon = spatial[:, 1]
+
+    n_bins = 20
+    lat_bins = np.linspace(lat.min(), lat.max(), n_bins + 1)
+    lon_bins = np.linspace(lon.min(), lon.max(), n_bins + 1)
+
+    lat_ids = np.digitize(lat, lat_bins) - 1
+    lon_ids = np.digitize(lon, lon_bins) - 1
+
+    cells: Dict[Tuple[int, int], list[int]] = {}
+    for i, (la, lo) in enumerate(zip(lat_ids, lon_ids)):
+        key = (la, lo)
+        cells.setdefault(key, []).append(i)
+
+    cell_keys = list(cells.keys())
+    rng.shuffle(cell_keys)
+
+    test_idx: list[int] = []
+    target = test_frac * n
+
+    for ck in cell_keys:
+        test_idx.extend(cells[ck])
+        if len(test_idx) >= target and len(test_idx) >= min_cells:
+            break
+
+    test_idx = np.array(test_idx, dtype=np.int64)
+    mask = np.ones(n, dtype=bool)
+    mask[test_idx] = False
+    train_idx = np.where(mask)[0]
+
+    # 👇 safety: if everything went to test, fallback to random
+    if len(train_idx) == 0 or len(test_idx) == 0:
+        idx = np.arange(n)
+        rng.shuffle(idx)
+        cut = int((1 - test_frac) * n)
+        return idx[:cut], idx[cut:]
+
+    return train_idx, test_idx
+
+
+
+# ========================================================
+# 6. MAIN SCRIPT
+# ========================================================
 if __name__ == "__main__":
     # 1) load + preprocess
     X_param, y, extras = load_with_preprocessor()
