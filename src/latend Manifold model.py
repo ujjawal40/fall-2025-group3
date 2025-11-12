@@ -453,13 +453,15 @@ if __name__ == "__main__":
         # start from spatial bundle (LATITUDE, LONGITUDE, ZIPCODE, FIPS, ...)
         X_surface = spatial.astype(np.float32).copy()
 
-    # 2) choose surface space
-    if extras["spatial"] is not None:
-        X_surface = extras["spatial"]
-        # basic standardization for distances
-        mean = X_surface.mean(axis=0, keepdims=True)
-        std = X_surface.std(axis=0, keepdims=True) + 1e-9
-        X_surface_std = (X_surface - mean) / std
+        # drop columns that are entirely NaN
+        keep_cols = ~np.isnan(X_surface).all(axis=0)
+        X_surface = X_surface[:, keep_cols]
+
+        # fill remaining NaNs with column means
+        if np.isnan(X_surface).any():
+            col_means = np.nanmean(X_surface, axis=0)
+            rows, cols = np.where(np.isnan(X_surface))
+            X_surface[rows, cols] = col_means[cols]
     else:
         # fallback to parametric features for distance
         mean = X_param.mean(axis=0, keepdims=True)
