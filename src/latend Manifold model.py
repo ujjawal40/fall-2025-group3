@@ -472,7 +472,11 @@ if __name__ == "__main__":
     X_surface_std = (X_surface - surf_mean) / surf_std
     print(f"[data] surface X shape (std): {X_surface_std.shape}")
 
-    # 4) build parametric model
+    # 4) build surface (kernel or LLR)
+    # surface = KernelDesirabilitySurface(X_surface_std, K=15, q=1.0)
+    surface = LLRDesirabilitySurface(X_surface_std, K=15, q=1.0)
+
+    # 5) build parametric model
     model = IntrinsicPriceNet(in_dim=X_param.shape[1])
 
     # 5) trainer
