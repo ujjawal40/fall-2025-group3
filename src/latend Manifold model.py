@@ -652,17 +652,49 @@ if __name__ == "__main__":
     y_true = np.exp(y)
     y_pred = np.exp(y_pred_log)
 
-    abs_rel = np.abs(y_pred - y_true) / y_true
-    within_5 = (abs_rel < 0.05).mean()
-    within_10 = (abs_rel < 0.10).mean()
-    within_15 = (abs_rel < 0.15).mean()
-    med_err = np.median(abs_rel)
+    # 5) Build model + trainer
+    model = IntrinsicPriceNet(in_dim=X_tr_std.shape[1])
+    trainer = LMETrainer(
+        X_param=X_tr_std,
+        y=y_tr,
+        surface=surface,
+        model=model,
+        reg_r=1e-1,
+        device=hp.device,
+    )
 
-    print("\n=== Paper-style metrics ===")
-    print(f"within 5%:  {within_5:.4f}")
-    print(f"within 10%: {within_10:.4f}")
-    print(f"within 15%: {within_15:.4f}")
-    print(f"median abs rel: {med_err:.4f}")
+    # 6) Train (pretrain + EM)
+    history = trainer.fit(
+        outer_iters=hp.em_iters,
+        warmup_epochs=hp.warmup_epochs,
+        mstep_epochs=hp.mstep_epochs,
+        batch_size=hp.batch_size,
+        lr=hp.lr,
+    )
+
+    # 7) Predictions (log-space)
+    y_pred_log_tr = trainer.predict(X_tr_std, surf_tr)
+    y_pred_log_te = trainer.predict(X_te_std, surf_te)
+
+    # Guard against overflow when exponentiating
+    y_pred_log_tr = np.clip(y_pred_log_tr, y_tr.min() - 1.0, y_tr.max() + 1.0)
+    y_pred_log_te = np.clip(y_pred_log_te, y_te.min() - 1.0, y_te.max() + 1.0)
+
+    # 8) Paper-style metrics (TRAIN / TEST)
+    def summarize(name: str, y_log_true: np.ndarray, y_log_pred: np.ndarray):
+        y_true = np.exp(y_log_true)
+        y_pred = np.exp(y_log_pred)
+        abs_rel = np.abs(y_pred - y_true) / y_true
+        within_5  = (abs_rel < 0.05).mean()
+        within_10 = (abs_rel < 0.10).mean()
+        within_15 = (abs_rel < 0.15).mean()
+        med_err   = np.median(abs_rel)
+        print(f"\n=== Paper-style metrics ({name}) ===")
+        print(f"within 5%:  {within_5:.4f}")
+        print(f"within 10%: {within_10:.4f}")
+        print(f"within 15%: {within_15:.4f}")
+        print(f"median abs rel: {med_err:.4f}")
+        return y_true, y_pred, abs_rel
 
     # 9) plots like notebook — save to files (headless friendly)
 
