@@ -481,9 +481,8 @@ if __name__ == "__main__":
 
     # 5) trainer
     trainer = LMETrainer(
-        X_np=X_np,
-        y_np=y_np,
-        model=model,
+        X_param=X_param,
+        y=y,
         surface=surface,
         model=model,
         reg_r=1e-2,
