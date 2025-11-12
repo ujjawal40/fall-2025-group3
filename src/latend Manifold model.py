@@ -340,6 +340,15 @@ class LMETrainer:
         X_t = torch.from_numpy(self.X_param).float().to(self.device)
         y_t = torch.from_numpy(self.y).float().to(self.device)
 
+        # we’ll log stuff in here
+        em_losses: list[float] = []
+        train_losses_per_iter: list[list[float]] = []
+
+        # 1) pretrain like your notebook
+        pretrain_losses = self._pretrain_model(X_t, y_t, epochs=3)
+
+        best_loss = float("inf")
+
         for it in range(outer_iters):
             # 1) build U_i from current surface definition
             U_list = self.surface.build_U_list()
