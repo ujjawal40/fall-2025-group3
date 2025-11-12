@@ -452,8 +452,13 @@ if __name__ == "__main__":
     spatial_cols = extras.get("spatial_cols", [])
 
     if spatial is not None and spatial.size > 0:
-        # start from spatial bundle (LATITUDE, LONGITUDE, ZIPCODE, FIPS, ...)
-        X_surface = spatial.astype(np.float32).copy()
+        # prefer just LATITUDE/LONGITUDE if both exist
+        if "LATITUDE" in spatial_cols and "LONGITUDE" in spatial_cols:
+            lat_idx = spatial_cols.index("LATITUDE")
+            lon_idx = spatial_cols.index("LONGITUDE")
+            X_surface = spatial[:, [lat_idx, lon_idx]].astype(np.float32).copy()
+        else:
+            X_surface = spatial.astype(np.float32).copy()
 
         # drop columns that are entirely NaN
         keep_cols = ~np.isnan(X_surface).all(axis=0)
