@@ -466,9 +466,11 @@ if __name__ == "__main__":
         std = X_param.std(axis=0, keepdims=True) + 1e-9
         X_surface_std = (X_param - mean) / std
 
-    # 3) build surface (kernel or LLR)
-    # surface = KernelDesirabilitySurface(X_surface_std, K=20, q=1.0)
-    surface = LLRDesirabilitySurface(X_surface_std, K=20, q=1.0)
+    # 3) standardize surface features for KDTree
+    surf_mean = X_surface.mean(axis=0, keepdims=True)
+    surf_std = X_surface.std(axis=0, keepdims=True) + 1e-9
+    X_surface_std = (X_surface - surf_mean) / surf_std
+    print(f"[data] surface X shape (std): {X_surface_std.shape}")
 
     # 4) build parametric model
     model = IntrinsicPriceNet(in_dim=X_param.shape[1])
