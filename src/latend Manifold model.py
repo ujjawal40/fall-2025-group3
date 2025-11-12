@@ -408,6 +408,23 @@ class LMETrainer:
 # ========================================================
 # 5. DATA LOADING VIA OUR PREPROCESSOR
 # ========================================================
+@dataclass
+class HParams:
+    test_size: float = 0.20
+    random_state: int = 42
+    em_iters: int = 6
+    warmup_epochs: int = 5
+    mstep_epochs: int = 3
+    batch_size: int = 512
+    lr: float = 1e-3
+    weight_decay: float = 0.0 # (not used by default Adam)
+    K: int = 25
+    q: float = 0.20
+    device: str = "cpu"
+    verbose: bool = True
+    max_train_rows: Optional[int] = None  # keep None to use all
+
+
 def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """
     Find the CSV, run Snowflake-like preprocessing, and return:
