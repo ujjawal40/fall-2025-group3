@@ -566,13 +566,67 @@ if __name__ == "__main__":
     # 5) build parametric model
     model = IntrinsicPriceNet(in_dim=X_param.shape[1])
 
-    # 5) trainer
-    trainer = LMETrainer(
-        X_param=X_param,
-        y=y,
-        surface=surface,
-        model=model,
-        reg_r=1e-2,
+    # fallback: random split
+    idx_all = rng.permutation(n)
+    cutoff = int((1.0 - hp.test_size) * n)
+    train_idx = idx_all[:cutoff]
+    test_idx = idx_all[cutoff:]
+
+    X_tr = X_param[train_idx]
+    X_te = X_param[test_idx]
+    y_tr = y[train_idx]
+    y_te = y[test_idx]
+
+    # use param X as surface
+    surf_tr_raw = X_tr.astype(np.float32)
+    surf_te_raw = X_te.astype(np.float32)
+
+    m_tr = surf_tr_raw.mean(axis=0, keepdims=True)
+    s_tr = surf_tr_raw.std(axis=0, keepdims=True) + 1e-9
+    surf_tr = (surf_tr_raw - m_tr) / s_tr
+
+    m_te = surf_te_raw.mean(axis=0, keepdims=True)
+    s_te = surf_te_raw.std(axis=0, keepdims=True) + 1e-9
+    surf_te = (surf_te_raw - m_te) / s_te
+
+    print(f"[split] train size: {len(train_idx)}, test size: {len(test_idx)}")
+    print(f"[data] surface train shape (std): {surf_tr.shape}")
+    print(f"[data] surface test shape (std): {surf_te.shape}")
+
+    return X_tr, X_te, y_tr, y_te, surf_tr, surf_te
+
+
+# =========================================================
+# 7. Metrics
+# =========================================================
+def compute_paper_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    abs_rel = np.abs(y_pred - y_true) / np.clip(y_true, 1e-9, None)
+    return {
+        "within_5": float((abs_rel < 0.05).mean()),
+        "within_10": float((abs_rel < 0.10).mean()),
+        "within_15": float((abs_rel < 0.15).mean()),
+        "median_abs_rel": float(np.median(abs_rel)),
+    }
+
+
+# =========================================================
+# 8. main
+# =========================================================
+if __name__ == "__main__":
+    hparams = LMEHyperparams(
+        test_size=0.20,
+        random_state=42,
+        em_iters=3,
+        warmup_epochs=5,
+        mstep_epochs=5,
+        batch_size=512,
+        lr=3e-4,
+        weight_decay=1e-4,
+        patience=3,
+        hidden_layers=(256, 128, 64, 32),
+        dropout_prob=0.1,
+        K=15,
+        q=1.0,
         device="cpu",
         zpid=extras.get("zpid"),
     )
