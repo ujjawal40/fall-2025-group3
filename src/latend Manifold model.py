@@ -517,6 +517,14 @@ if __name__ == "__main__":
         X_new=X_param,
         surf_X_new=X_surface_std,
     )
+    y_true_train = np.exp(y_train)
+    y_pred_train = np.exp(y_pred_log_train)
+    abs_rel_train = np.abs(y_pred_train - y_true_train) / y_true_train
+    print("\n=== Paper-style metrics (TRAIN) ===")
+    print(f"within 5%:  {(abs_rel_train < 0.05).mean():.4f}")
+    print(f"within 10%: {(abs_rel_train < 0.10).mean():.4f}")
+    print(f"within 15%: {(abs_rel_train < 0.15).mean():.4f}")
+    print(f"median abs rel: {np.median(abs_rel_train):.4f}")
 
     # convert back to price to compute relative errors
     y_true = np.exp(y)
