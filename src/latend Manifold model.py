@@ -449,6 +449,8 @@ if __name__ == "__main__":
 
     # 2) build a NaN-safe surface feature matrix
     spatial = extras.get("spatial")
+    spatial_cols = extras.get("spatial_cols", [])
+
     if spatial is not None and spatial.size > 0:
         # start from spatial bundle (LATITUDE, LONGITUDE, ZIPCODE, FIPS, ...)
         X_surface = spatial.astype(np.float32).copy()
