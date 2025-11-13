@@ -644,6 +644,9 @@ if __name__ == "__main__":
         dropout_prob=0.1,
         K=15,
         q=1.0,
+        reg_r=1e-2,
+        hidden_layers=(80, 40),
+        dropout_prob=0.0,
         device="cpu",
         zpid=extras.get("zpid"),
     )
