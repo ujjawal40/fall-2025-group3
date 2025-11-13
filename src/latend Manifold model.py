@@ -652,8 +652,44 @@ if __name__ == "__main__":
         zpid=extras.get("zpid"),
     )
 
-    # 7) run EM (and get history back)
-    history = trainer.fit(outer_iters=3)
+    # 1) load & preprocess
+    X_param_all, y_all, extras = load_with_preprocessor(hp)
+    if hp.verbose:
+        print(f"[data] parametric X shape: {X_param_all.shape}, y shape: {y_all.shape}")
+
+    # 2) surface matrix
+    X_surface_all, surf_cols = build_surface_matrix(extras, X_param_all)
+
+    # 3) spatial split
+    # drop rows with NaN in surface (should already be filled, but guard anyway)
+    mask_valid = ~np.isnan(X_surface_all).any(axis=1)
+    if not mask_valid.all() and hp.verbose:
+        print(f"[split] dropping {(~mask_valid).sum()} rows with NaN surface")
+    X_param_all = X_param_all[mask_valid]
+    y_all = y_all[mask_valid]
+    X_surface_all = X_surface_all[mask_valid]
+
+    train_mask, test_mask = spatial_train_test_split(X_surface_all, test_size=hp.test_size, seed=hp.random_state)
+    if hp.verbose:
+        print(f"[split] train size: {train_mask.sum()}, test size: {test_mask.sum()}")
+
+    X_tr, X_te = X_param_all[train_mask], X_param_all[test_mask]
+    y_tr, y_te = y_all[train_mask], y_all[test_mask]
+    S_tr, S_te = X_surface_all[train_mask], X_surface_all[test_mask]
+
+    # ---- Project lat/lon (deg) to meters using an equirectangular approximation
+    R = 6_371_000.0  # Earth radius in meters
+
+    # use TRAIN means to anchor both train and test (prevents train/test shift)
+    lat0 = np.deg2rad(S_tr[:, 0]).mean()
+    lon0 = np.deg2rad(S_tr[:, 1]).mean()
+
+    # train → meters
+    lat_tr = np.deg2rad(S_tr[:, 0])
+    lon_tr = np.deg2rad(S_tr[:, 1])
+    x_tr = R * (lon_tr - lon0) * np.cos(lat0)
+    y_tr = R * (lat_tr - lat0)
+    S_tr_m = np.c_[y_tr, x_tr].astype(np.float32)
 
     # 8) evaluate on the same 10k (since we sampled)
     y_pred_log = trainer.predict(
