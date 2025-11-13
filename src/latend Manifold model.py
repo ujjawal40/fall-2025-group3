@@ -707,9 +707,31 @@ if __name__ == "__main__":
     print(f"within 15%: {(abs_rel_train < 0.15).mean():.4f}")
     print(f"median abs rel: {np.median(abs_rel_train):.4f}")
 
-    # convert back to price to compute relative errors
-    y_true = np.exp(y)
-    y_pred = np.exp(y_pred_log)
+    if use_ppsqft:
+        sqft_tr = np.clip(sqft_all[train_mask], 1.0, None)
+        sqft_te = np.clip(sqft_all[test_mask], 1.0, None)
+        # log-ppsqft = log_price - log(sqft)
+        y_tr_pp = y_tr_raw - np.log(sqft_tr)
+        y_te_pp = y_te_raw - np.log(sqft_te)
+        # train-only clip in PPSQFT space
+        pp_clip = np.quantile(np.exp(y_tr_pp), 0.995)
+        y_tr = np.log(np.clip(np.exp(y_tr_pp), 0.0, pp_clip))
+        y_te = np.log(np.clip(np.exp(y_te_pp), 0.0, pp_clip))
+        extras["ppsqft_clip"] = float(pp_clip)
+        # sample weights from PPSQFT distribution
+        q50, q90 = np.quantile(np.exp(y_tr), [0.50, 0.90])
+        w_tr = np.ones_like(y_tr, dtype=np.float32)
+        w_tr[np.exp(y_tr) >= q50] = 1.2
+        w_tr[np.exp(y_tr) >= q90] = 1.6
+    else:
+        # LOG_PRICE target fallback
+        y_tr, y_te = y_tr_raw.copy(), y_te_raw.copy()
+        q50, q90 = np.quantile(np.exp(y_tr), [0.50, 0.90])
+        w_tr = np.ones_like(y_tr, dtype=np.float32)
+        w_tr[np.exp(y_tr) >= q50] = 1.2
+        w_tr[np.exp(y_tr) >= q90] = 1.6
+        sqft_tr = np.ones_like(y_tr)
+        sqft_te = np.ones_like(y_te)
 
     # 5) Build model + trainer
     model = IntrinsicPriceNet(in_dim=X_tr_std.shape[1])
