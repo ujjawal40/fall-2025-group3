@@ -228,6 +228,8 @@ def cg_solve(
         rsold = rsnew
     return x
 
+    hist["iters"] = max_iter
+    return x, hist
 
 # ----------------------------
 # 4. LME TRAINER
