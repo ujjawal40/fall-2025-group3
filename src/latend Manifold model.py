@@ -547,6 +547,8 @@ if __name__ == "__main__":
     # 2) build a NaN-safe surface feature matrix
     spatial = extras.get("spatial")
     spatial_cols = extras.get("spatial_cols", [])
+    if spatial is None or spatial.size == 0 or "LATITUDE" not in spatial_cols or "LONGITUDE" not in spatial_cols:
+        raise RuntimeError("LATITUDE / LONGITUDE not found in extras['spatial']; can't do spatial split.")
 
     if spatial is not None and spatial.size > 0:
         # prefer just LATITUDE/LONGITUDE if both exist
