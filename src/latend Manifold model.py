@@ -765,6 +765,8 @@ if __name__ == "__main__":
         batch_size=hp.batch_size,
         lr=hp.lr,
     )
+    tmp.U_list = surf_full.build_U_list()
+    tmp._update_D()  # one E-step at the end
 
     # 7) Predictions (log-space)
     y_pred_log_tr = trainer.predict(X_tr_std, surf_tr)
