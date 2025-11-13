@@ -636,9 +636,10 @@ if __name__ == "__main__":
         test_size=0.20,
         random_state=42,
         max_rows=None,          # set to 100_000 if you want a hard cap
-        em_iters=3,
-        warmup_epochs=5,
-        mstep_epochs=5,
+        em_iters=6,
+        warmup_epochs=2,
+        mstep_epochs=6,
+        patience=5,
         batch_size=512,
         lr=3e-4,
         weight_decay=1e-4,
