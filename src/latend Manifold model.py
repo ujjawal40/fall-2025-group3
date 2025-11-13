@@ -679,8 +679,20 @@ if __name__ == "__main__":
     y_tr, y_te = y_all[train_mask], y_all[test_mask]
     S_tr, S_te = X_surface_all[train_mask], X_surface_all[test_mask]
 
-    # ---- Project lat/lon (deg) to meters using an equirectangular approximation
-    R = 6_371_000.0  # Earth radius in meters
+    # 4) lat/lon -> meters (only if we truly have lat/lon)
+    have_ll = surf_cols[:2] == ["LATITUDE", "LONGITUDE"]
+    if have_ll:
+        R = 6_371_000.0  # meters
+        lat_tr = np.deg2rad(S_tr[:, 0]); lon_tr = np.deg2rad(S_tr[:, 1])
+        lat0 = lat_tr.mean()
+        x_tr = R * (lon_tr - lon_tr.mean()) * np.cos(lat0)
+        y_tr_m = R * (lat_tr - lat0)
+        S_tr_m = np.c_[y_tr_m, x_tr].astype(np.float32)
+
+        lat_te = np.deg2rad(S_te[:, 0]); lon_te = np.deg2rad(S_te[:, 1])
+        x_te = R * (lon_te - lon_tr.mean()) * np.cos(lat0)  # anchor to TRAIN mean
+        y_te_m = R * (lat_te - lat0)
+        S_te_m = np.c_[y_te_m, x_te].astype(np.float32)
 
     # use TRAIN means to anchor both train and test (prevents train/test shift)
     lat0 = np.deg2rad(S_tr[:, 0]).mean()
