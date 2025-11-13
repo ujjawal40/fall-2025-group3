@@ -633,6 +633,7 @@ if __name__ == "__main__":
     hparams = LMEHyperparams(
         test_size=0.20,
         random_state=42,
+        max_rows=None,          # set to 100_000 if you want a hard cap
         em_iters=3,
         warmup_epochs=5,
         mstep_epochs=5,
