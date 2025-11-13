@@ -214,6 +214,7 @@ def cg_solve(
     x = np.zeros(n) if x0 is None else x0.copy()
     r = b - apply_A(x)
     p = r.copy()
+    r0 = np.linalg.norm(r) + 1e-12
     rsold = np.dot(r, r)
 
     for _ in range(max_iter):
