@@ -614,6 +614,10 @@ if __name__ == "__main__":
 
     return X_tr, X_te, y_tr, y_te, surf_tr, surf_te
 
+def to_ppsqft_from_logs(y_log_price: np.ndarray, sqft: np.ndarray) -> np.ndarray:
+    price = np.exp(np.clip(y_log_price, -20.0, 20.0))
+    sqft_safe = np.clip(sqft.astype(np.float64), 1.0, 1e12)
+    return price / sqft_safe
 
 # =========================================================
 # 7. Metrics
