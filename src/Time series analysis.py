@@ -396,13 +396,30 @@ class ZipMonthIndexBuilder:
         else:
             zip_series = pd.Series(pd.NA, index=ce.index)
 
-        ce = (
-            ce
-            .with_column("EVT_DATE", F.to_date(F.col("evt_date")))
-            .filter(F.col("EVT_DATE").is_not_null())
-            .filter(F.col("EVT_DATE") >= F.to_date(F.lit(self.min_start_date)))
-            .with_column("YM", F.to_date(F.date_trunc("month", F.col("EVT_DATE"))))
-            .with_column("DAY_FOR_SPLIT", F.col("EVT_DATE"))
+        # STATE: if missing, fill with NA series
+        if "STATE" in ce.columns:
+            state_series = ce["STATE"]
+        else:
+            state_series = pd.Series(pd.NA, index=ce.index)
+
+        # COUNTY: if missing, fill with NA series
+        if "COUNTY" in ce.columns:
+            county_series = ce["COUNTY"]
+        else:
+            county_series = pd.Series(pd.NA, index=ce.index)
+
+        # Convert to string dtype; pd.NA is handled correctly inside a Series
+        ce["ZIPCODE"]     = zip_series.astype("string")
+        ce["STATE_MODE"]  = state_series.astype("string")
+        ce["COUNTY_MODE"] = county_series.astype("string")
+
+        # ---------------------------------
+        # Event type / price / rental flag
+        # ---------------------------------
+        price_col = "evt_price" if "evt_price" in ce.columns else "EVT_PRICE"
+        evt_type_col = "evt_type" if "evt_type" in ce.columns else "EVT_TYPE"
+        rent_col = "evt_is_rental" if "evt_is_rental" in ce.columns else (
+            "EVT_IS_RENTAL" if "EVT_IS_RENTAL" in ce.columns else None
         )
 
         ce = (
