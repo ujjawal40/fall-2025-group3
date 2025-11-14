@@ -365,8 +365,36 @@ class ZipMonthIndexBuilder:
         self.min_sold = int(min_sold_per_zip_m)
         self.min_list = int(min_list_per_zip_m)
 
-    def build(self) -> SnowparkDF:
-        ce = self.ce
+    def build(self) -> pd.DataFrame:
+        ce = self.ce.copy()
+
+        # ---------------------------------
+        # Canonical event date
+        # ---------------------------------
+        if "EVT_DATE" in ce.columns:
+            ce["EVT_DATE"] = pd.to_datetime(ce["EVT_DATE"], errors="coerce")
+        elif "evt_date" in ce.columns:
+            ce["EVT_DATE"] = pd.to_datetime(ce["evt_date"], errors="coerce")
+        else:
+            raise KeyError("Combined events missing EVT_DATE/evt_date")
+
+        ce = ce[ce["EVT_DATE"].notna()]
+        ce = ce[ce["EVT_DATE"] >= pd.to_datetime(self.min_start_date)]
+
+        # ---------------------------------
+        # Month index + split date
+        # ---------------------------------
+        ce["YM"] = ce["EVT_DATE"].values.astype("datetime64[M]")
+        ce["DAY_FOR_SPLIT"] = ce["EVT_DATE"]
+
+        # ---------------------------------
+        # Safe creation of ZIPCODE / STATE_MODE / COUNTY_MODE
+        # ---------------------------------
+        # ZIPCODE: if missing, fill with NA series
+        if "ZIPCODE" in ce.columns:
+            zip_series = ce["ZIPCODE"]
+        else:
+            zip_series = pd.Series(pd.NA, index=ce.index)
 
         ce = (
             ce
