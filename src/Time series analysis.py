@@ -275,6 +275,10 @@ class CombinedEventsBuilder:
         flat[self.c_evt_mls_id] = v.apply(
             lambda d: get_val(get_val(d, "attributeSource", {}) or {}, "infoString1", None)
         )
+        flat[self.c_evt_mls_name] = v.apply(
+            lambda d: get_val(get_val(d, "attributeSource", {}) or {}, "infoString2", None)
+        )
+        flat["RAW_TIME_MS_STR"] = v.apply(lambda d: get_val(d, "time", None))
 
         ms_num  = F.call_function("TO_NUMBER", F.col("raw_time_ms_str"))
         epoch0  = F.to_timestamp_ntz(F.lit("1970-01-01 00:00:00"))
