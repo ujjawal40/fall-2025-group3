@@ -330,6 +330,11 @@ class CombinedEventsBuilder:
                 .filter(F.col("_rnk") == 1)
                 .drop("_rnk")
             )
+            base_no_json = base_no_json.sort_values(
+                [self.zpid_col, self.scrape_ts_col],
+                ascending=[True, False]
+            )
+            base_latest = base_no_json.drop_duplicates(subset=[self.zpid_col], keep="first")
         else:
             agg_exprs = [F.any_value(F.col(c)).alias(c) for c in cols_no_json if c != self.zpid_col]
             base_latest = base_no_json.group_by(self.zpid_col).agg(*agg_exprs)
