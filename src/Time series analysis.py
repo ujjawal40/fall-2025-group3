@@ -1162,23 +1162,23 @@ class ZipIndexFeatureizer:
         )
         return df
 
-    def _add_idx_lags_mom(self, df):
-        w_zip = Window.partition_by("ZIPCODE").order_by(F.col("YM"))
-        s = F.col("IDX").cast(T.DoubleType())
-        lag1 = F.lag(s,1).over(w_zip); lag3 = F.lag(s,3).over(w_zip); lag6 = F.lag(s,6).over(w_zip)
-        nz1 = F.call_function("NULLIF", lag1, F.lit(0.0))
-        nz3 = F.call_function("NULLIF", lag3, F.lit(0.0))
-        nz6 = F.call_function("NULLIF", lag6, F.lit(0.0))
-        df = (df
-              .with_column("IDX_LAG_1", lag1)
-              .with_column("IDX_LAG_3", lag3)
-              .with_column("IDX_LAG_6", lag6)
-              .with_column("IDX_PCT_D1", s / nz1 - F.lit(1.0))
-              .with_column("IDX_MOM_3", s / nz3 - F.lit(1.0))
-              .with_column("IDX_MOM_6", s / nz6 - F.lit(1.0))
-              .with_column("IDX_ROLL_STD_3", F.stddev_samp(s).over(w_zip.rows_between(-2, 0)))
-              .with_column("IDX_ROLL_STD_6", F.stddev_samp(s).over(w_zip.rows_between(-5, 0)))
-        )
+    def _add_macro_lags(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not self.add_macro:
+            return df
+        df = df.sort_values(["ZIPCODE", "YM"]).copy()
+        grp = df.groupby("ZIPCODE")
+
+        for base, alias in [
+            ("WEEKLY_AVERAGE_MORTGAGE_RATE", "MORTGAGE_RATE_M"),
+            ("UNEMPLOYMENT_RATE", "UNEMPLOYMENT_RATE_M"),
+        ]:
+            if base not in df.columns:
+                continue
+            s = pd.to_numeric(df[base], errors="coerce")
+            df[alias] = s
+            for lag in [1, 3, 12]:
+                df[f"{alias}_L{lag}"] = grp[alias].shift(lag)
+                df[f"{alias}_D{lag}"] = df[alias] - grp[alias].shift(lag)
         return df
 
     def _add_macro_lags(self, df):
