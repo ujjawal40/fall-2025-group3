@@ -264,27 +264,16 @@ class CombinedEventsBuilder:
             .filter(F.col("PH_JSON").is_not_null())
             .with_column(self.c_zpid_key, F.col(self.zpid_col).cast("string"))
         )
-
-        flat = (
-            base_core
-            .select(
-                self.zpid_col, self.c_zpid_key,
-                F.flatten("PH_JSON").alias("SEQ","KEY","PATH","IDX","VAL","THIS")
-            )
-            .select(
-                F.col(self.zpid_col),
-                F.col(self.c_zpid_key),
-                F.to_date(F.col("VAL")["date"]).alias(self.c_evt_date),
-                F.lower(F.col("VAL")["event"].cast("string")).alias(self.c_evt_type),
-                F.col("VAL")["price"].cast(FloatType()).alias(self.c_evt_price),
-                F.col("VAL")["pricePerSquareFoot"].cast(FloatType()).alias(self.c_evt_price_psf),
-                F.coalesce(F.col("VAL")["postingIsRental"].cast("boolean"), F.lit(False)).alias(self.c_evt_is_rent),
-                F.col("VAL")["source"].cast("string").alias(self.c_evt_source),
-                F.col("VAL")["attributeSource"]["infoString1"].cast("string").alias(self.c_evt_mls_id),
-                F.col("VAL")["attributeSource"]["infoString2"].cast("string").alias(self.c_evt_mls_name),
-                F.col("VAL")["time"].cast("string").alias("raw_time_ms_str"),
-                F.col("IDX").alias("json_index"),
-            )
+        flat[self.c_evt_price_psf] = pd.to_numeric(
+            v.apply(lambda d: get_val(d, "pricePerSquareFoot", None)),
+            errors="coerce"
+        )
+        flat[self.c_evt_is_rent] = v.apply(
+            lambda d: bool(get_val(d, "postingIsRental", False))
+        )
+        flat[self.c_evt_source] = v.apply(lambda d: get_val(d, "source", None))
+        flat[self.c_evt_mls_id] = v.apply(
+            lambda d: get_val(get_val(d, "attributeSource", {}) or {}, "infoString1", None)
         )
 
         ms_num  = F.call_function("TO_NUMBER", F.col("raw_time_ms_str"))
