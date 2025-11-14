@@ -1356,6 +1356,18 @@ def build_all_features(
 
     return feat_sp
 
+# Build combined events
+print("Building combined_events from PRICEHISTORY…")
+builder = CombinedEventsBuilder(
+    base_df=raw_df,
+    zpid_col="ZPID",
+    pricehistory_col="PRICEHISTORY",
+    scrape_ts_col="SCRAPEDAT",
+)
+combined_events = builder.build()
+print("combined_events shape:", combined_events.shape)
+
+# Build feature matrix
 print("Orchestrating full feature build…")
 feat_sp = build_all_features(
     combined_events=combined_events,
