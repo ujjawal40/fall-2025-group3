@@ -1332,17 +1332,22 @@ def build_all_features(
         print("LAT/LON/EVT_DATE not present — skipping geo-tiling.")
 
     print("Assembling feature matrix (ZipIndexFeatureizer)…")
-    try:
-        feat_sp = ZipIndexFeatureizer(idx_sp, pm_sp, zm_sp, geo_sp).build()
-    except Exception as e1:
-        try:
-            feat_sp = ZipIndexFeatureizer(idx_sp, ht_share_sp, num_agg_sp, bin_agg_sp).build()
-        except Exception as e2:
-            raise RuntimeError(
-                "Failed to build features with both ZipIndexFeatureizer signatures.\n"
-                f"New-signature error: {repr(e1)}\n"
-                f"Old-signature error: {repr(e2)}"
-            )
+    feat_df = idx_df.copy()
+    if geo_df is not None:
+        # merge on ZIP+YM; STATE_MODE/COUNTY_MODE already in idx_df
+        geo_cols = [c for c in geo_df.columns if c not in {"STATE_MODE", "COUNTY_MODE"}]
+        feat_df = feat_df.merge(
+            geo_df[geo_cols],
+            on=["ZIPCODE", "YM"],
+            how="left",
+        )
+
+    feat_df = ZipIndexFeatureizer(feat_df, add_macro=True, monthly_periods=(12, 6)).build()
+
+    # ensure YM / DAY_FOR_SPLIT are datetime
+    for c in ("YM", "DAY_FOR_SPLIT"):
+        if c in feat_df.columns:
+            feat_df[c] = pd.to_datetime(feat_df[c], errors="coerce")
 
     must_haves = ["YM", "IDX", "Y_H1", "Y_H2"]
     missing = [c for c in must_haves if c not in feat_sp.columns]
