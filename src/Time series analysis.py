@@ -422,15 +422,16 @@ class ZipMonthIndexBuilder:
             "EVT_IS_RENTAL" if "EVT_IS_RENTAL" in ce.columns else None
         )
 
-        ce = (
-            ce
-            .with_column("ZIPCODE", F.col("ZIPCODE").cast("string"))
-            .with_column("STATE_MODE", F.col("STATE").cast("string"))
-            .with_column("COUNTY_MODE", F.col("COUNTY").cast("string"))
-            .with_column("EVT_PRICE", F.col("evt_price").cast(T.DoubleType()))
-            .with_column("EVT_TYPE", F.lower(F.col("evt_type").cast("string")))
-            .with_column("EVT_IS_RENTAL", F.coalesce(F.col("evt_is_rental").cast(T.BooleanType()), F.lit(False)))
-        )
+        ce["EVT_PRICE"] = pd.to_numeric(ce[price_col], errors="coerce")
+        ce["EVT_TYPE"] = ce[evt_type_col].astype(str).str.lower()
+
+        if rent_col is not None:
+            ce["EVT_IS_RENTAL"] = ce[rent_col].fillna(False).astype(bool)
+        else:
+            ce["EVT_IS_RENTAL"] = False
+
+        # Filter out rentals
+        ce_nr = ce[~ce["EVT_IS_RENTAL"]].copy()
 
         listing_like = F.col("EVT_TYPE").in_(
             F.lit("listing"), F.lit("for sale"), F.lit("listed for sale"), F.lit("price change")
