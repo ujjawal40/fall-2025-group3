@@ -699,6 +699,7 @@ class VariantPriceFeatures:
                 )
                 .drop("J_ZPID","J_YM")
             )
+            base = base.merge(macro, on=keys, how="left")
 
         pm = pm.select(
             "ZPID","YM","ZIPCODE",
