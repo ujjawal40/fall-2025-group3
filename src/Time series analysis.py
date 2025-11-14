@@ -1137,9 +1137,29 @@ class ZipIndexFeatureizer:
         )
 
         for p in self.periods:
-            rad = F.lit(2.0 * 3.141592653589793) * (months_since / F.lit(float(p)))
-            df = df.with_column(f"SEAS_SIN_{p}", F.call_function("SIN", rad))
-            df = df.with_column(f"SEAS_COS_{p}", F.call_function("COS", rad))
+            angle = 2.0 * math.pi * (df["GLOBAL_MONTH_INDEX"] / float(p))
+            df[f"SEAS_SIN_{p}"] = np.sin(angle)
+            df[f"SEAS_COS_{p}"] = np.cos(angle)
+        return df
+
+    def _add_idx_lags_mom(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.sort_values(["ZIPCODE", "YM"]).copy()
+        grp = df.groupby("ZIPCODE")
+        for lag in [1, 3, 6]:
+            df[f"IDX_LAG_{lag}"] = grp["IDX"].shift(lag)
+
+        df["IDX_PCT_D1"] = df["IDX"] / df["IDX_LAG_1"].replace(0, np.nan) - 1.0
+        df["IDX_MOM_3"]   = df["IDX"] / df["IDX_LAG_3"].replace(0, np.nan) - 1.0
+        df["IDX_MOM_6"]   = df["IDX"] / df["IDX_LAG_6"].replace(0, np.nan) - 1.0
+
+        df["IDX_ROLL_STD_3"] = (
+            grp["IDX"].rolling(window=3, min_periods=1).std()
+            .reset_index(level=0, drop=True)
+        )
+        df["IDX_ROLL_STD_6"] = (
+            grp["IDX"].rolling(window=6, min_periods=1).std()
+            .reset_index(level=0, drop=True)
+        )
         return df
 
     def _add_idx_lags_mom(self, df):
