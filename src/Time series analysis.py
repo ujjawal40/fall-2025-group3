@@ -670,10 +670,17 @@ class VariantPriceFeatures:
             med_aliases  = [f"{c}_MED"  for c in num_bool_cols]
             mean_aliases = [f"{c}_MEAN" for c in num_bool_cols]
 
-            agg_exprs = (
-                [F.median(F.col(c)).alias(a) for c, a in zip(num_bool_cols, med_aliases)] +
-                [F.avg(F.col(c).cast(T.DoubleType())).alias(a) for c, a in zip(num_bool_cols, mean_aliases)]
-            )
+        # reliability weights
+        n_tx = np.maximum(
+            base["N_SOLD"].fillna(0).astype(float),
+            base["N_LIST"].fillna(0).astype(float)
+        )
+        w_hist_raw = np.minimum(base["N_MONTHS_TO_DATE"], 24).astype(float)
+        w_hist = np.log1p(w_hist_raw) / np.log1p(12.0)
+        w_hist = np.maximum(w_hist, 0.2)
+        w_tx = np.log1p(n_tx) / 3.0
+        w_tx = np.maximum(w_tx, 0.2)
+        base["W_H1_COMBINED"] = np.minimum(w_hist * w_tx, 1.0)
 
             pm_more = (
                 ev.group_by("ZPID","YM").agg(*agg_exprs)
