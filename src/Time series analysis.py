@@ -1126,10 +1126,16 @@ class ZipIndexFeatureizer:
         self.idx_df = idx_df; self.pm = variant_pm; self.zm = variant_zm; self.geo = geo_df
         self.add_macro = add_macro; self.periods = monthly_periods; self.origin = start_origin
 
-    def _add_temporal(self, df):
-        origin = F.to_date(F.lit(self.origin))
-        months_since = F.call_function("DATEDIFF","month", origin, F.col("YM"))
-        df = df.with_column("GLOBAL_MONTH_INDEX", months_since.cast(T.IntegerType()))
+    def _add_temporal(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df["YM"] = pd.to_datetime(df["YM"], errors="coerce")
+        origin_year = self.origin.year
+        origin_month = self.origin.month
+        df["GLOBAL_MONTH_INDEX"] = (
+            (df["YM"].dt.year - origin_year) * 12
+            + (df["YM"].dt.month - origin_month)
+        )
+
         for p in self.periods:
             rad = F.lit(2.0 * 3.141592653589793) * (months_since / F.lit(float(p)))
             df = df.with_column(f"SEAS_SIN_{p}", F.call_function("SIN", rad))
