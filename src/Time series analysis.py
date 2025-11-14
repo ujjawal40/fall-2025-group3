@@ -432,6 +432,11 @@ class ZipMonthIndexBuilder:
 
         # Filter out rentals
         ce_nr = ce[~ce["EVT_IS_RENTAL"]].copy()
+        print(f"[ZipMonthIndexBuilder] non-rental events: {len(ce_nr):,}")
+
+        # see what EVT_TYPE actually looks like
+        print("[ZipMonthIndexBuilder] EVT_TYPE sample:")
+        print(ce_nr["EVT_TYPE"].value_counts().head(15))
 
         listing_like = F.col("EVT_TYPE").in_(
             F.lit("listing"), F.lit("for sale"), F.lit("listed for sale"), F.lit("price change")
