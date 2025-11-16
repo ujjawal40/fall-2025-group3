@@ -866,8 +866,17 @@ class GeoTilingFeatures:
             df = df.with_column(col_name, self._tile_expr(r))
             added_cols.append(col_name)
 
-        out_cols = ["ZIPCODE", "YM", "STATE_MODE", "COUNTY_MODE", *added_cols]
-        return df.select(*[F.col(c) for c in out_cols])
+    for r in resolutions:
+        col_name = f"{prefix}{r}"
+        agg[col_name] = (
+            "H3R" + str(r)
+            + agg["LATITUDE"].round(3).astype(str)
+            + "_"
+            + agg["LONGITUDE"].round(3).astype(str)
+        )
+
+    cols = ["ZIPCODE", "YM", "STATE_MODE", "COUNTY_MODE"] + [f"{prefix}{r}" for r in resolutions]
+    return agg[cols]
 
 # ============================================
 # SLIM VARIANT FEATURES (PM / ZM) FROM combined_events
