@@ -861,10 +861,12 @@ class GeoTilingFeatures:
         df = self.df
         added_cols = []
 
-        for r in self.resolutions:
-            col_name = f"{self.prefix}{r}"
-            df = df.with_column(col_name, self._tile_expr(r))
-            added_cols.append(col_name)
+    agg = subset.groupby(["ZIPCODE", "YM"], as_index=False).agg(
+        LATITUDE=("LATITUDE", "median"),
+        LONGITUDE=("LONGITUDE", "median"),
+        STATE_MODE=("STATE", mode_or_first),
+        COUNTY_MODE=("COUNTY", mode_or_first),
+    )
 
     for r in resolutions:
         col_name = f"{prefix}{r}"
