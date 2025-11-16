@@ -1978,7 +1978,12 @@ print(f"[CELL11:DATA] train={n_trn:,} ({steps_trn} steps/epoch) | val={n_val:,} 
 # ROLLING BACKTEST
 # ============================================
 def rolling_backtest(pdf, n_folds=3, fold_len_days=60):
-    days = pd.to_datetime(pdf["DAY_FOR_SPLIT"] if "DAY_FOR_SPLIT" in pdf.columns else pdf["YM"])
+    # Use the same label definition as the main split
+    labels_ok = pdf["Y_H1"].notna() & pdf["Y_H2"].notna() & pdf["IDX"].notna()
+    tcol = "DAY_FOR_SPLIT" if "DAY_FOR_SPLIT" in pdf.columns else "YM"
+
+    # Only build folds over the labeled window
+    days = pd.to_datetime(pdf.loc[labels_ok, tcol])
     tmin, tmax = days.min(), days.max()
     folds = []
     for i in range(n_folds):
