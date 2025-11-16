@@ -1451,7 +1451,12 @@ class TabularDataset(Dataset):
         self.weights_col = weights_col
 
         if len(num_cols) > 0:
-            self.df.loc[:, num_cols] = self.df[num_cols].astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            self.df.loc[:, num_cols] = (
+                self.df[num_cols]
+                .astype(float)
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+            )
 
         self.X_num = torch.tensor(self.df[num_cols].astype(np.float32).values, dtype=torch.float32) if num_cols else None
 
