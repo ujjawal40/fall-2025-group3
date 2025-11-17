@@ -2285,3 +2285,13 @@ def plot_holdout_radar(h1: Dict[str, Any], h2: Dict[str, Any]):
 # ============================================
 rolling_results = rolling_backtest(pdf, n_folds=3, fold_len_days=60)
 print("\nRolling backtest results:", rolling_results)
+
+eval_df = build_eval_frame_from_run(h1, h2, rolling_results)
+print("\n[viz] eval_df head:")
+print(eval_df.head())
+
+plot_mae_wape_bars(eval_df)
+plot_r2_lines(eval_df)
+plot_robustness_bars(eval_df)
+plot_interval_calibration(eval_df)
+plot_holdout_radar(h1, h2)
