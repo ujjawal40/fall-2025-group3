@@ -2023,8 +2023,21 @@ def rolling_backtest(pdf, n_folds=3, fold_len_days=60):
 
         ds_trn = TabularDataset(pdf, trn_mask, X_cols_num, X_cols_cat, cat_maps, TARGETS, weights_col="W_H1")
         ds_hld = TabularDataset(pdf, hld_mask, X_cols_num, X_cols_cat, cat_maps, TARGETS, weights_col=None)
-        model = MultiTaskQuantileNet(len(X_cols_num), [len(cat_maps[c]) for c in X_cols_cat], EMB_DIM_CAP, HIDDEN, LAYERS, DROPOUT, len(TARGETS), len(QUANTILES))
-        model = train_one(model, ds_trn, ds_trn, QUANTILES)  # quick
+
+        model = MultiTaskQuantileNet(
+            len(X_cols_num),
+            [len(cat_maps[c]) for c in X_cols_cat],
+            EMB_DIM_CAP,
+            HIDDEN,
+            LAYERS,
+            DROPOUT,
+            len(TARGETS),
+            len(QUANTILES),
+        )
+
+        # quick backtest: train & "validate" on same set
+        model = train_one(model, ds_trn, ds_trn, QUANTILES)
+
         dl_h = DataLoader(ds_hld, batch_size=BATCH_SIZE, shuffle=False)
         h1 = eval_split(model, dl_h, QUANTILES, 0)
         h2 = eval_split(model, dl_h, QUANTILES, 1)
