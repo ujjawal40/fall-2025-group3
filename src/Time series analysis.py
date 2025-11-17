@@ -1382,11 +1382,10 @@ print("combined_events shape:", combined_events.shape)
 print("Orchestrating full feature build…")
 feat_sp = build_all_features(
     combined_events=combined_events,
-    h3_udf=globals().get("H3_UDF_NAME", None),
-    h3_resolutions=globals().get("H3_RESOLUTIONS", (6,7,8,9)),
-    min_start_date=globals().get("MIN_START_DATE", "2022-01-01"),
-    min_sold_per_zip_m=globals().get("MIN_SOLD_PER_ZIP_M", 3),
-    min_list_per_zip_m=globals().get("MIN_LIST_PER_ZIP_M", 5),
+    h3_resolutions=(6, 7, 8, 9),
+    min_start_date=MIN_START_DATE,
+    min_sold_per_zip_m=MIN_SOLD_PER_ZIP_M,
+    min_list_per_zip_m=MIN_LIST_PER_ZIP_M,
 )
 print("feat_sp ready. Columns:", len(feat_sp.columns))
 
