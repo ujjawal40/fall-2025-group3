@@ -2010,9 +2010,17 @@ def rolling_backtest(pdf, n_folds=3, fold_len_days=60):
     results = []
     for k,(train_end, hold_start, hold_end) in enumerate(folds[::-1], 1):
         print(f"\n[Fold {k}] train ≤ {train_end.date()} | holdout=[{hold_start.date()} … {hold_end.date()}]")
-        tcol = "DAY_FOR_SPLIT" if "DAY_FOR_SPLIT" in pdf.columns else "YM"
-        trn_mask = pdf[tcol] <= train_end
-        hld_mask = (pdf[tcol] >= hold_start) & (pdf[tcol] <= hold_end)
+
+        trn_mask = labels_ok & (pdf[tcol] <= train_end)
+        hld_mask = labels_ok & (pdf[tcol] >= hold_start) & (pdf[tcol] <= hold_end)
+
+        print(f"[Fold {k}] train rows (labeled)={int(trn_mask.sum()):,} | holdout rows (labeled)={int(hld_mask.sum()):,}")
+
+        if hld_mask.sum() == 0:
+            print(f"[Fold {k}] No labeled holdout rows – skipping this fold.")
+            results.append(dict(fold=k, H1=None, H2=None))
+            continue
+
         ds_trn = TabularDataset(pdf, trn_mask, X_cols_num, X_cols_cat, cat_maps, TARGETS, weights_col="W_H1")
         ds_hld = TabularDataset(pdf, hld_mask, X_cols_num, X_cols_cat, cat_maps, TARGETS, weights_col=None)
         model = MultiTaskQuantileNet(len(X_cols_num), [len(cat_maps[c]) for c in X_cols_cat], EMB_DIM_CAP, HIDDEN, LAYERS, DROPOUT, len(TARGETS), len(QUANTILES))
