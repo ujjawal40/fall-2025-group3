@@ -1134,8 +1134,10 @@ class ZipIndexFeatureizer:
                  variant_zm: SnowparkDF | None, geo_df: SnowparkDF | None,
                  add_macro: bool = True, monthly_periods: tuple = (12, 6),
                  start_origin: str = "2015-01-01"):
-        self.idx_df = idx_df; self.pm = variant_pm; self.zm = variant_zm; self.geo = geo_df
-        self.add_macro = add_macro; self.periods = monthly_periods; self.origin = start_origin
+        self.idx_df = idx_df.copy()
+        self.add_macro = add_macro
+        self.periods = monthly_periods
+        self.origin = pd.to_datetime(start_origin)
 
     def _add_temporal(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
