@@ -1130,9 +1130,9 @@ except Exception:
 # ZIP INDEX FEATUREIZER + BUILD_ALL_FEATURES
 # ============================================
 class ZipIndexFeatureizer:
-    def __init__(self, idx_df: SnowparkDF, variant_pm: SnowparkDF | None,
-                 variant_zm: SnowparkDF | None, geo_df: SnowparkDF | None,
-                 add_macro: bool = True, monthly_periods: tuple = (12, 6),
+    def __init__(self, idx_df: pd.DataFrame,
+                 add_macro: bool = True,
+                 monthly_periods: tuple = (12, 6),
                  start_origin: str = "2015-01-01"):
         self.idx_df = idx_df.copy()
         self.add_macro = add_macro
