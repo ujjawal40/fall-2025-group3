@@ -1194,22 +1194,11 @@ class ZipIndexFeatureizer:
                 df[f"{alias}_D{lag}"] = df[alias] - grp[alias].shift(lag)
         return df
 
-    def _add_macro_lags(self, df):
-        if not self.add_macro: return df
-        w_zip = Window.partition_by("ZIPCODE").order_by(F.col("YM"))
-        for base, alias in [("WEEKLY_AVERAGE_MORTGAGE_RATE","MORTGAGE_RATE_M"),
-                            ("UNEMPLOYMENT_RATE","UNEMPLOYMENT_RATE_M")]:
-            if base not in df.columns: continue
-            s = F.col(base).cast(T.DoubleType())
-            df = (df
-                  .with_column(alias, s)
-                  .with_column(f"{alias}_L1",  F.lag(s, 1).over(w_zip))
-                  .with_column(f"{alias}_L3",  F.lag(s, 3).over(w_zip))
-                  .with_column(f"{alias}_L12", F.lag(s, 12).over(w_zip))
-                  .with_column(f"{alias}_D1",  s - F.lag(s,1).over(w_zip))
-                  .with_column(f"{alias}_D3",  s - F.lag(s,3).over(w_zip))
-                  .with_column(f"{alias}_D12", s - F.lag(s,12).over(w_zip))
-                 )
+    def build(self) -> pd.DataFrame:
+        df = self.idx_df.copy()
+        df = self._add_temporal(df)
+        df = self._add_idx_lags_mom(df)
+        df = self._add_macro_lags(df)
         return df
 
     def build(self) -> SnowparkDF:
