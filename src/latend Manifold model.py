@@ -208,13 +208,16 @@ class LaplacianOp:
         # Prebuild neighbor lists for Laplacian
         self.lap_list: List[Tuple[np.ndarray, np.ndarray]] = []
         for i in range(self.n):
-            x_i = self.X[i]  # (d,)
-            neigh_idx = self.nn_indices[i]
-            neigh_idx = neigh_idx[neigh_idx != i]
-
-            X_neigh = self.X[neigh_idx]  # (k, d)
-            # kernel weights for LLR
-            w = self._kernel_weights(x_i, neigh_idx)  # (k,)
+            d, ind = self.tree.query(self.S[i:i+1], k=self.K + 1)
+            ind = ind[0]; d = d[0]
+            mask = ind != i
+            idxs = ind[mask][:self.K]
+            d2 = (d[mask][:self.K] ** 2)
+            # symmetric-ish weights (normalized)
+            sigma2 = float(np.median(d2) + 1e-12)
+            w = np.exp(- self.q * d2 / (2.0 * sigma2))
+            w = w / (w.sum() + 1e-12)
+            self.lap_list.append((idxs.astype(np.int32), w.astype(np.float32)))
 
             # Design matrix Z = [1, x_j]
             ones = np.ones((X_neigh.shape[0], 1))
