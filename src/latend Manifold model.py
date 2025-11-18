@@ -82,13 +82,17 @@ class IntrinsicPriceNet(nn.Module):
     """
     def __init__(self, in_dim: int, h1: int = 80, h2: int = 40):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, h1),
-            nn.ReLU(),
-            nn.Linear(h1, h2),
-            nn.ReLU(),
-            nn.Linear(h2, 1)
-        )
+        mods: List[nn.Module] = []
+        last = in_dim
+        for h in hidden:
+            mods.append(nn.Linear(last, h))
+            mods.append(nn.BatchNorm1d(h))     # BatchNorm (important)
+            mods.append(nn.ReLU())
+            if dropout_prob > 0:
+                mods.append(nn.Dropout(dropout_prob))
+            last = h
+        mods.append(nn.Linear(last, 1))
+        self.net = nn.Sequential(*mods)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze(-1)  # (batch,) not (batch,1)
