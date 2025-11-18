@@ -25,7 +25,27 @@ import pandas as pd
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.neighbors import KDTree
+import matplotlib.pyplot as plt
+
+from data_preprocessor_LME import DataPreprocessor
+
+
+# ------------------------- Hyperparams -------------------------
+@dataclass
+class HParams:
+    # Data / splits
+    test_size: float = 0.20
+    inner_val_frac: float = 0.12        # VAL proportion INSIDE TRAIN (spatial)
+    random_state: int = 42
+    max_rows: Optional[int] = None
+
+    # EM loop
+    em_iters: int = 6
+    warmup_epochs: int = 8
+    mstep_epochs: int = 12
+    patience: int = 10                  # M-step early stop on VAL (full energy)
 
 from src.data_preprocessor import DataPreprocessor  # both in src/
 
