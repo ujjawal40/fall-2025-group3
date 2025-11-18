@@ -196,22 +196,17 @@ class KernelDesirabilitySurface(BaseDesirabilitySurface):
             U_list.append((neigh_idx, weights))
         return U_list
 
-
-# ----------------------------
-# 2b. WEIGHTED LOCAL LINEAR REGRESSION VERSION
-# ----------------------------
-class LLRDesirabilitySurface(BaseDesirabilitySurface):
-    """
-    For each x_i, fit a local weighted linear reg on its neighbors
-    with targets = desirabilities of neighbors.
-    BUT during phase 1 we *don't* know D yet. The paper notes (remark 1)
-    that h_i can still be written as
-         h_i = sum_{j in N(i)} a_ij * d_j
-    where a_ij depends only on X, not on D.
-    So here we precompute those a_ij.
-    """
-    def build_U_list(self) -> List[Tuple[np.ndarray, np.ndarray]]:
-        U_list = []
+# --------------------- Graph Laplacian (optional) ---------------------
+class LaplacianOp:
+    """Matrix-free Laplacian-vector multiply using the same KDTree."""
+    def __init__(self, surf: KernelSurface, K_lap: Optional[int] = None, q: float = 1.0):
+        self.S = surf.S
+        self.tree = surf.tree
+        self.n = surf.n
+        self.K = int(K_lap or surf.K)
+        self.q = float(q)
+        # Prebuild neighbor lists for Laplacian
+        self.lap_list: List[Tuple[np.ndarray, np.ndarray]] = []
         for i in range(self.n):
             x_i = self.X[i]  # (d,)
             neigh_idx = self.nn_indices[i]
