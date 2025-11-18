@@ -1241,11 +1241,8 @@ def build_all_features(
     min_start_date="2022-01-01",
     min_sold_per_zip_m=10,
     min_list_per_zip_m=20,
-) -> SnowparkDF:
-    assert isinstance(combined_events, SnowparkDF)
-    sess = combined_events.session
-
-    print("Building ZIP×month index & aggregates (robust)…")
+) -> pd.DataFrame:
+    print("Building ZIP×month index & aggregates (pandas)…")
     idx_builder = ZipMonthIndexBuilder(
         combined_events=combined_events,
         min_start_date=min_start_date,
