@@ -49,9 +49,32 @@ class HParams:
 
 from src.data_preprocessor import DataPreprocessor  # both in src/
 
-# ----------------------------
-# 1. PARAMETRIC COMPONENT
-# ----------------------------
+    # Surface / neighbors
+    K: int = 40                         # neighbors for desirability interpolation
+    q: float = 1.0                      # base sharpness (scaled by adaptive sigma)
+    K_lap: Optional[int] = None         # neighbors for Laplacian; None => K
+    lap_lambda: float = 0.02            # λ for Laplacian smoothing (0 disables)
+
+    # Regularization on D (ridge)
+    reg_r: float = 5e-2
+
+    # Intrinsic model
+    hidden_layers: Tuple[int, ...] = (256, 128, 64, 32)
+    dropout_prob: float = 0.25
+
+    # Compute
+    device: str = "cpu"
+
+    # CG (E-step) stopping
+    cg_rel_tol: float = 1e-5
+    cg_max_iter: int = 300
+    cg_patience: int = 10
+
+    # Logging
+    verbose: bool = True
+
+
+# --------------------- Intrinsic Price Network ---------------------
 class IntrinsicPriceNet(nn.Module):
     """
     G(W, x): parametric model that predicts the intrinsic log-price m_i
