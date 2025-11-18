@@ -1,30 +1,139 @@
-Run timestamp: (see commit date)
-Command: python src/xgboost_model.py --data src/sub_sample.csv --target PRICE --max-rows 10000
+ZIP×MONTH TAB-MTL QUANTILE MODEL – RESULTS SUMMARY
+==================================================
 
-Dataset summary
----------------
-Loaded data shape: (100000, 136)
-Cleaned data shape: (100000, 113)
-Feature matrix shape: (99957, 111)
-Target shape: (99957,)
-Features used: 111 (see script output for full listing)
-Training split details:
-  Train rows: 7994 | Validation rows: 1999 | Features: 35794
-  Target mean (train): 507677.03 | Target mean (valid): 507863.87
-
-Validation metrics (dollar space)
----------------------------------
-rmse: 237396.1291
-mae: 94566.1715
-r2: 0.7287
-
-Validation metrics (log1p transformed target)
+1. MAIN HOLDOUT PERFORMANCE (last 1–2 months)
 ---------------------------------------------
-rmse_transformed: 0.4144
-mae_transformed: 0.1924
-r2_transformed: 0.7055
 
-Notes
------
-- The runner applies a log1p transform to the PRICE target during training to stabilise optimisation, then reports metrics in both the original dollar space and the transformed domain.
-- Use the --output-dir flag to save generated plots and --no-show to suppress interactive windows when running in headless environments.
+HORIZON H1 (1-month ahead)
+  MAE           : 31.73
+  R²            : 0.9971
+  WAPE          : 0.0424
+  MdAPE         : 0.0311
+  Pct |err|≤10% : 0.8093
+  PI cover      : 0.9803
+  Rel. width    : 0.8913
+
+HORIZON H2 (2-month ahead)
+  MAE           : 31.27
+  R²            : 0.9960
+  WAPE          : 0.0428
+  MdAPE         : 0.0294
+  Pct |err|≤10% : 0.8232
+  PI cover      : 0.9774
+  Rel. width    : 0.8500
+
+
+2. SUPPRESSION / CONFIDENCE GATING (HOLDOUT)
+--------------------------------------------
+
+H1:
+  Suppressed predictions : 1038
+  Total evaluated        : 1369
+  Suppression rate       : 0.7582
+
+H2:
+  Suppressed predictions : 929
+  Total evaluated        : 1369
+  Suppression rate       : 0.6786
+
+
+3. ROLLING BACKTEST (3 FOLDS, 60-DAY WINDOWS)
+---------------------------------------------
+
+Metrics per fold (holdout window only):
+
+Columns:
+  MAE, R², WAPE, MdAPE, Pct |err|≤10%, PI cover, Rel. width
+
+Fold 1
+~~~~~~
+  Window:
+    train ≤ 2024-12-03
+    holdout ≈ [2024-12-04 … 2025-02-01]
+
+  H1:
+    MAE           : 84.83
+    R²            : 0.9738
+    WAPE          : 0.0993
+    MdAPE         : 0.0466
+    Pct |err|≤10% : 0.6584
+    PI cover      : 0.9096
+    Rel. width    : 0.9812
+
+  H2:
+    MAE           : 71.82
+    R²            : 0.9837
+    WAPE          : 0.0872
+    MdAPE         : 0.0459
+    Pct |err|≤10% : 0.6744
+    PI cover      : 0.9671
+    Rel. width    : 0.9317
+
+
+Fold 2
+~~~~~~
+  Window:
+    train ≤ 2025-02-01
+    holdout ≈ [2025-02-02 … 2025-04-02]
+
+  H1:
+    MAE           : 39.99
+    R²            : 0.9977
+    WAPE          : 0.0474
+    MdAPE         : 0.0411
+    Pct |err|≤10% : 0.7529
+    PI cover      : 0.9780
+    Rel. width    : 0.9292
+
+  H2:
+    MAE           : 28.76
+    R²            : 0.9976
+    WAPE          : 0.0398
+    MdAPE         : 0.0341
+    Pct |err|≤10% : 0.8286
+    PI cover      : 0.9725
+    Rel. width    : 0.8809
+
+
+Fold 3
+~~~~~~
+  Window:
+    train ≤ 2025-04-02
+    holdout ≈ [2025-04-03 … 2025-06-01]
+
+  H1:
+    MAE           : 41.54
+    R²            : 0.9932
+    WAPE          : 0.0555
+    MdAPE         : 0.0279
+    Pct |err|≤10% : 0.7889
+    PI cover      : 0.9737
+    Rel. width    : 0.7786
+
+  H2:
+    MAE           : 28.03
+    R²            : 0.9978
+    WAPE          : 0.0383
+    MdAPE         : 0.0335
+    Pct |err|≤10% : 0.8028
+    PI cover      : 0.9204
+    Rel. width    : 0.6639
+
+
+4. SUMMARY (H1 vs H2)
+---------------------
+
+- H2 (2-month ahead) generally achieves:
+    * Lower MAE and WAPE
+    * Better median %-error (MdAPE)
+    * Higher fraction of predictions within ±10% of true prices
+    * Narrower prediction intervals (lower relative width)
+
+- H1 (1-month ahead) is slightly more conservative:
+    * Very strong R² and WAPE
+    * Higher PI coverage and somewhat wider intervals
+    * Heavier suppression (more predictions gated out) under the width threshold
+
+Overall, both horizons show very strong generalization on both the fixed holdout
+and the rolling backtests, with H2 being sharper and H1 being slightly more
+conservative in its uncertainty quantification.
