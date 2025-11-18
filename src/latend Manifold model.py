@@ -116,21 +116,16 @@ class BaseDesirabilitySurface:
     We always return a *sparse* representation of U_i:
        U_i = (indices, weights) so that h_i = sum_j weights[j] * d[indices[j]]
     """
-    def __init__(
-        self,
-        X_np: np.ndarray,
-        K: int = 13,
-        q: float = 1.0,
-    ):
-        """
-        X_np: (n_samples, n_features) *standardized* features used for distance
-        K:    number of neighbors N(x)
-        q:    kernel sharpness in exp(-q ||x - x_j||^2)
-        """
-        self.X = X_np
-        self.n, self.d = X_np.shape
-        self.K = K
-        self.q = q
+    latlon: (n,2) with columns [LAT, LON] in degrees
+    lat0_rad: reference latitude (radians), use TRAIN mean
+    returns (n,2) [y, x] meters
+    """
+    R = 6_371_000.0
+    lat = np.deg2rad(latlon[:, 0])
+    lon = np.deg2rad(latlon[:, 1])
+    x = R * (lon - lon.mean()) * np.cos(lat0_rad)
+    y = R * (lat - lat0_rad)
+    return np.c_[y, x].astype(np.float32)
 
         # precompute pairwise distances once (O(n^2)), fine for sub_sample.csv
         # then keep top-K per point
