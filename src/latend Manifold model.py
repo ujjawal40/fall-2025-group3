@@ -144,12 +144,13 @@ class KernelSurface:
         self.q = float(q)
         self.tree = KDTree(self.S, leaf_size=40)
 
-    def _kernel_weights(self, x_i: np.ndarray, neigh_idx: np.ndarray) -> np.ndarray:
-        neigh = self.X[neigh_idx]
-        d2 = np.sum((neigh - x_i) ** 2, axis=1)
-        w = np.exp(-self.q * d2)
-        w = w / (w.sum() + 1e-12)
-        return w
+    def _neighbors(self, i: int) -> Tuple[np.ndarray, np.ndarray]:
+        # return neighbor indices and squared distances (drop self)
+        d, ind = self.tree.query(self.S[i:i+1], k=self.K + 1)
+        ind = ind[0]
+        d = d[0]
+        mask = ind != i
+        return ind[mask][:self.K], (d[mask][:self.K] ** 2)
 
     def build_U_list(self) -> List[Tuple[np.ndarray, np.ndarray]]:
         """
