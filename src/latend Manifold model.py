@@ -184,8 +184,13 @@ class KernelDesirabilitySurface(BaseDesirabilitySurface):
             x_i = self.X[i]
             neigh_idx = self.nn_indices[i]
 
-            # IMPORTANT per paper: remove self if present
-            neigh_idx = neigh_idx[neigh_idx != i]
+    def interpolate_one(self, x_new_std: np.ndarray, D: np.ndarray) -> float:
+        # query neighbors in TRAIN space
+        d, ind = self.tree.query(x_new_std.reshape(1, -1), k=self.K)
+        ind = ind[0]
+        d2 = (d[0] ** 2)
+        w = self._adapt_weights(d2)
+        return float(np.dot(w, D[ind].astype(np.float64)))
 
             weights = self._kernel_weights(x_i, neigh_idx)
             U_list.append((neigh_idx, weights))
