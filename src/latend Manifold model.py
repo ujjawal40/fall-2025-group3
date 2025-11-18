@@ -131,18 +131,18 @@ class BaseDesirabilitySurface:
         # then keep top-K per point
         self.nn_indices = self._build_all_neighbors()
 
-    def _build_all_neighbors(self) -> List[np.ndarray]:
-        """
-        For every i, return indices of K+1 nearest points (we'll drop self later).
-        """
-        # pairwise squared distances
-        X2 = np.sum(self.X ** 2, axis=1, keepdims=True)
-        # (n, n) distance matrix
-        dists = X2 + X2.T - 2 * (self.X @ self.X.T)
-        np.fill_diagonal(dists, np.inf)
-        # argsort along each row
-        nn_idx = np.argsort(dists, axis=1)[:, : self.K]
-        return [nn_idx[i] for i in range(self.n)]
+class KernelSurface:
+    """
+    KD-tree surface with adaptive bandwidth:
+    - For each i, sigma_i^2 = median(d2 to its K neighbors) + eps
+    - weights_ij ∝ exp( - d2_ij / (2 * sigma_i^2) )
+    """
+    def __init__(self, S_train_std: np.ndarray, K: int = 40, q: float = 1.0):
+        self.S = S_train_std.astype(np.float32)
+        self.n, self.d = self.S.shape
+        self.K = int(K)
+        self.q = float(q)
+        self.tree = KDTree(self.S, leaf_size=40)
 
     def _kernel_weights(self, x_i: np.ndarray, neigh_idx: np.ndarray) -> np.ndarray:
         neigh = self.X[neigh_idx]
