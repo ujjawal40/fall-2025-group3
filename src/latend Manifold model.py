@@ -152,12 +152,11 @@ class KernelSurface:
         mask = ind != i
         return ind[mask][:self.K], (d[mask][:self.K] ** 2)
 
-    def build_U_list(self) -> List[Tuple[np.ndarray, np.ndarray]]:
-        """
-        This will be overridden by subclasses to produce
-        U_i = (indices, weights) so that h_i = sum weights * d[indices]
-        """
-        raise NotImplementedError
+    def _adapt_weights(self, d2_i: np.ndarray) -> np.ndarray:
+        sigma2 = float(np.median(d2_i) + 1e-12)
+        w = np.exp(- self.q * d2_i / (2.0 * sigma2))
+        s = w.sum() + 1e-12
+        return w / s
 
     # helper for prediction time
     def interpolate_one(self, x_new: np.ndarray, D: np.ndarray) -> float:
