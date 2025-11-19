@@ -137,3 +137,45 @@ Fold 3
 Overall, both horizons show very strong generalization on both the fixed holdout
 and the rolling backtests, with H2 being sharper and H1 being slightly more
 conservative in its uncertainty quantification.
+
+
+% =========================
+% Table 1 — Comparison with paper (TEST, PPSQFT)
+% =========================
+\begin{table}[ht]
+\centering
+\caption{Test accuracy within price error thresholds (PPSQFT). “With Loc” corresponds to models that use location features. Paper numbers are taken from the reported table; our row shows your latest test metrics.}
+\label{tab:compare-paper}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Algorithm} & \multicolumn{2}{c}{\textbf{With Loc}} \\
+\cmidrule(lr){2-3}
+ & \textbf{$<\!5\%$} & \textbf{$<\!15\%$} \\
+\midrule
+Nearest Neighbor (paper)      & 27.51 & 68.31 \\
+Neural Network (paper)        & 27.43 & 70.10 \\
+LME \textit{(kernel)} (paper) & \textbf{29.39} & \textbf{71.70} \\
+LME \textit{(llr)} (paper)    & \textbf{29.67} & \textbf{72.06} \\
+S\,-\,LME \textit{(llr)} (paper) & \textbf{29.69} & \textbf{72.15} \\
+\addlinespace
+\textbf{Our LME (this work)}  & \textbf{18.10} & \textbf{50.62} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =========================
+% Table 2 — Our full metrics (TRAIN vs TEST, PPSQFT)
+% =========================
+\begin{table}[ht]
+\centering
+\caption{Our Latent Manifold model: Train vs Test metrics (PPSQFT).}
+\label{tab:ours-train-test}
+\begin{tabular}{lcccc}
+\toprule
+ & \textbf{$<\!5\%$} & \textbf{$<\!10\%$} & \textbf{$<\!15\%$} & \textbf{Median abs rel} \\
+\midrule
+\textbf{Train} & 25.54\% & 49.10\% & 67.54\% & 0.1022 \\
+\textbf{Test}  & 18.10\% & 35.45\% & 50.62\% & 0.1479 \\
+\bottomrule
+\end{tabular}
+\end{table}
