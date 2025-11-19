@@ -719,11 +719,21 @@ if __name__ == "__main__":
     tr_metrics = price_metrics_from_logs(y_tr, y_pred_tr)
     te_metrics = price_metrics_from_logs(y_te, y_pred_te)
 
-    print(f"\n=== Paper-style metrics (TRAIN, {target_name}) ===")
-    print(f"within 5%:  {tr_metrics['within_5']:.4f}")
-    print(f"within 10%: {tr_metrics['within_10']:.4f}")
-    print(f"within 15%: {tr_metrics['within_15']:.4f}")
-    print(f"median abs rel: {tr_metrics['median_abs_rel']:.4f}")
+    # --------- Pretty print + save summary ---------
+    tr_tbl = pretty_table(f"Paper-style metrics (TRAIN, {target_name})", tr_metrics)
+    te_tbl = pretty_table(f"Paper-style metrics (TEST, {target_name})", te_metrics)
+    print(tr_tbl)
+    print(te_tbl)
+
+    with open("results_summary.md", "w") as f:
+        f.write("# Latent Manifold Estimation — Results Summary\n\n")
+        f.write(f"**Target:** {target_name}\n\n")
+        f.write("## Train Metrics\n\n")
+        f.write("| Metric | Value |\n|---|---|\n")
+        f.write(f"| < 5% within | {tr_metrics['within_5']*100:.2f}% |\n")
+        f.write(f"| < 10% within | {tr_metrics['within_10']*100:.2f}% |\n")
+        f.write(f"| < 15% within | {tr_metrics['within_15']*100:.2f}% |\n")
+        f.write(f"| Median abs rel | {tr_metrics['median_abs_rel']:.4f} |\n\n")
 
     print(f"\n=== Paper-style metrics (TEST, {target_name}) ===")
     print(f"within 5%:  {te_metrics['within_5']:.4f}")
