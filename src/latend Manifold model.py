@@ -735,11 +735,18 @@ if __name__ == "__main__":
         f.write(f"| < 15% within | {tr_metrics['within_15']*100:.2f}% |\n")
         f.write(f"| Median abs rel | {tr_metrics['median_abs_rel']:.4f} |\n\n")
 
-    print(f"\n=== Paper-style metrics (TEST, {target_name}) ===")
-    print(f"within 5%:  {te_metrics['within_5']:.4f}")
-    print(f"within 10%: {te_metrics['within_10']:.4f}")
-    print(f"within 15%: {te_metrics['within_15']:.4f}")
-    print(f"median abs rel: {te_metrics['median_abs_rel']:.4f}")
+        f.write("## Test Metrics\n\n")
+        f.write("| Metric | Value |\n|---|---|\n")
+        f.write(f"| < 5% within | {te_metrics['within_5']*100:.2f}% |\n")
+        f.write(f"| < 10% within | {te_metrics['within_10']*100:.2f}% |\n")
+        f.write(f"| < 15% within | {te_metrics['within_15']*100:.2f}% |\n")
+        f.write(f"| Median abs rel | {te_metrics['median_abs_rel']:.4f} |\n\n")
+
+        f.write("## Figures\n\n")
+        f.write("- `em_loss.png` — EM iteration loss (inner-train energy)\n")
+        f.write("- `mstep_losses.png` — M-step losses per EM (inner-train)\n")
+        f.write("- `pred_vs_true_test.png` — Predicted vs True (TEST)\n")
+        f.write("- `abs_rel_hist_test.png` — Absolute Relative Error (TEST)\n")
 
     # 8) plots saved to files
     if history.get("em_losses"):
