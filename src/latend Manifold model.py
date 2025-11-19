@@ -2,10 +2,11 @@
 # ============================================================
 # Latent Manifold Estimation (paper-aligned) with:
 # - PPSQFT target (preferred) or LOG_PRICE (fallback)
-# - Spatial splits + inner spatial VAL for early stopping
+# - Spatial outer split + inner spatial VAL for early stopping
 # - KDTree surface in meters w/ adaptive RBF bandwidth
-# - Weighted E- and M- steps, Laplacian smoothing on D (optional)
+# - Weighted E- and M- steps, optional Laplacian smoothing on D
 # - BatchNorm+Dropout intrinsic net, warmup+cosine LR
+# - Neat results table + markdown summary + plots saved to disk
 # ============================================================
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ class IntrinsicPriceNet(nn.Module):
         last = in_dim
         for h in hidden:
             mods.append(nn.Linear(last, h))
-            mods.append(nn.BatchNorm1d(h))     # BatchNorm (important)
+            mods.append(nn.BatchNorm1d(h))
             mods.append(nn.ReLU())
             if dropout_prob > 0:
                 mods.append(nn.Dropout(dropout_prob))
@@ -108,7 +109,7 @@ class KernelSurface:
     """
     KD-tree surface with adaptive bandwidth:
     - For each i, sigma_i^2 = median(d2 to its K neighbors) + eps
-    - weights_ij ∝ exp( - d2_ij / (2 * sigma_i^2) )
+    - weights_ij ∝ exp( - q * d2_ij / (2 * sigma_i^2) )
     """
     def __init__(self, S_train_std: np.ndarray, K: int = 40, q: float = 1.0):
         self.S = S_train_std.astype(np.float32)
@@ -118,7 +119,6 @@ class KernelSurface:
         self.tree = KDTree(self.S, leaf_size=40)
 
     def _neighbors(self, i: int) -> Tuple[np.ndarray, np.ndarray]:
-        # return neighbor indices and squared distances (drop self)
         d, ind = self.tree.query(self.S[i:i+1], k=self.K + 1)
         ind = ind[0]
         d = d[0]
@@ -136,11 +136,10 @@ class KernelSurface:
         for i in range(self.n):
             idxs, d2 = self._neighbors(i)
             w = self._adapt_weights(d2)
-            U.append((idxs, w.astype(np.float32)))
+            U.append((idxs.astype(np.int32), w.astype(np.float32)))
         return U
 
     def interpolate_one(self, x_new_std: np.ndarray, D: np.ndarray) -> float:
-        # query neighbors in TRAIN space
         d, ind = self.tree.query(x_new_std.reshape(1, -1), k=self.K)
         ind = ind[0]
         d2 = (d[0] ** 2)
@@ -157,7 +156,6 @@ class LaplacianOp:
         self.n = surf.n
         self.K = int(K_lap or surf.K)
         self.q = float(q)
-        # Prebuild neighbor lists for Laplacian
         self.lap_list: List[Tuple[np.ndarray, np.ndarray]] = []
         for i in range(self.n):
             d, ind = self.tree.query(self.S[i:i+1], k=self.K + 1)
@@ -165,7 +163,6 @@ class LaplacianOp:
             mask = ind != i
             idxs = ind[mask][:self.K]
             d2 = (d[mask][:self.K] ** 2)
-            # symmetric-ish weights (normalized)
             sigma2 = float(np.median(d2) + 1e-12)
             w = np.exp(- self.q * d2 / (2.0 * sigma2))
             w = w / (w.sum() + 1e-12)
@@ -222,10 +219,10 @@ def cg_solve_qp(apply_A, b: np.ndarray, x0: Optional[np.ndarray] = None,
 class LMETrainer:
     def __init__(
         self,
-        X_tr: np.ndarray,               # standardized param (TRAIN)
-        y_tr: np.ndarray,               # TRAIN target in log space (log_ppsqft or log_price)
-        w_tr: np.ndarray,               # TRAIN sample weights (>=0)
-        S_tr_std: np.ndarray,           # TRAIN surface std
+        X_tr: np.ndarray,               # standardized param (TRAIN-INNER)
+        y_tr: np.ndarray,               # TRAIN-INNER log target (log_ppsqft or log_price)
+        w_tr: np.ndarray,               # TRAIN-INNER sample weights (>=0)
+        S_tr_std: np.ndarray,           # TRAIN-INNER surface std
         S_val_std: np.ndarray,          # VAL surface std
         model: IntrinsicPriceNet,
         surf: KernelSurface,
@@ -245,10 +242,9 @@ class LMETrainer:
         self.n = X_tr.shape[0]
         self.D = np.zeros(self.n, dtype=np.float64)  # desirabilities
 
-        # Precompute neighbor weights for TRAIN once
+        # Precompute neighbor weights for TRAIN-INNER once
         self.U_list = self.surf.build_U_list()
 
-    # ---------- utilities ----------
     def _compute_h(self, D: np.ndarray, U_list: List[Tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
         h = np.zeros(self.n, dtype=np.float64)
         for i, (idxs, w) in enumerate(U_list):
@@ -256,7 +252,6 @@ class LMETrainer:
         return h
 
     def _h_on_val(self, D: np.ndarray) -> np.ndarray:
-        # interpolate D (TRAIN) on VAL coordinates using TRAIN KDTree
         h_val = [self.surf.interpolate_one(sv, D) for sv in self.S_val_std]
         return np.array(h_val, dtype=np.float64)
 
@@ -289,7 +284,7 @@ class LMETrainer:
                 print(f"[pretrain] epoch {ep+1}/{self.hp.warmup_epochs} - loss: {avg:.4f}")
         return losses
 
-    # ---------- E-step: solve D with CG (weighted + Laplacian + gauge) ----------
+    # ---------- E-step: solve D (weighted + Laplacian + gauge) ----------
     def _update_D(self):
         y = self.y_tr
         w = self.w_tr.astype(np.float64)
@@ -329,7 +324,6 @@ class LMETrainer:
 
     # ---------- M-step: train W on residuals with spatial VAL early-stop ----------
     def _mstep(self, X_val: np.ndarray, y_val: np.ndarray) -> List[float]:
-        # Precompute h on TRAIN and VAL with current D
         h_tr = self._compute_h(self.D, self.U_list).astype(np.float32)
         h_val = self._h_on_val(self.D).astype(np.float32)
 
@@ -344,7 +338,6 @@ class LMETrainer:
         opt = torch.optim.AdamW(self.model.parameters(), lr=self.hp.lr, weight_decay=self.hp.weight_decay)
         loss_fn = nn.MSELoss(reduction="none")
 
-        # simple warmup+cosine across mstep_epochs
         def lr_factor(epoch: int) -> float:
             warm = min(1.0, (epoch + 1) / max(1, self.hp.warmup_epochs))
             prog = max(0.0, (epoch + 1 - self.hp.warmup_epochs) / max(1, self.hp.mstep_epochs - self.hp.warmup_epochs))
@@ -369,7 +362,6 @@ class LMETrainer:
             for xb, yb, hb, wb in loader:
                 xb = xb.to(self.hp.device); yb = yb.to(self.hp.device)
                 hb = hb.to(self.hp.device); wb = wb.to(self.hp.device)
-                # residual target
                 y_res = yb - hb
                 pred_m = self.model(xb)
                 per = loss_fn(pred_m, y_res) * wb
@@ -383,7 +375,7 @@ class LMETrainer:
             if self.hp.verbose:
                 print(f"[m-step] epoch {ep+1}/{self.hp.mstep_epochs} - loss: {avg:.6f}")
 
-            # ---- VAL check: full energy on VAL (y_val - (m_val + h_val)) ----
+            # VAL energy on spatial holdout
             self.model.eval()
             with torch.no_grad():
                 m_val = self.model(X_val_t)
@@ -400,7 +392,6 @@ class LMETrainer:
                         print("[m-step] early stopping (VAL)")
                     break
 
-        # restore best
         if best_state is not None:
             self.model.load_state_dict(best_state)
 
@@ -408,34 +399,33 @@ class LMETrainer:
 
     def fit(self, X_val: np.ndarray, y_val: np.ndarray) -> Dict[str, Any]:
         history = {"pretrain_losses": [], "em_losses": [], "mstep_losses_per_iter": []}
-
         history["pretrain_losses"] = self._pretrain()
 
         for it in range(self.hp.em_iters):
             if self.hp.verbose:
                 print(f"[em] iteration {it+1}/{self.hp.em_iters}")
 
-            # E-step: D
-            self._update_D()
+            prev = history["em_losses"][-1] if history["em_losses"] else None
 
-            # M-step: W with inner VAL early-stop
+            self._update_D()
             m_losses = self._mstep(X_val, y_val)
             history["mstep_losses_per_iter"].append(m_losses)
 
-            # report train energy after this EM iteration
             with torch.no_grad():
                 m_tr = self.model(torch.from_numpy(self.X_tr).float().to(self.hp.device)).cpu().numpy()
             h_tr = self._compute_h(self.D, self.U_list)
             energy = 0.5 * np.mean((self.y_tr - (m_tr + h_tr)) ** 2)
             history["em_losses"].append(float(energy))
+
+            imp = (prev - energy) if prev is not None else float("inf")
             if self.hp.verbose:
-                print(f"[em]   loss: {energy:.6f}  |  improvement: "
-                      f"{(history['em_losses'][-2] - energy):.6f}" if len(history["em_losses"]) > 1 else
-                      f"[em]   loss: {energy:.6f}  |  improvement: inf")
+                if prev is None:
+                    print(f"[em]   loss: {energy:.6f}  |  improvement: inf")
+                else:
+                    print(f"[em]   loss: {energy:.6f}  |  improvement: {imp:.6f}")
 
         return history
 
-    # Predict on any standardized surface coords (uses TRAIN KDTree)
     def predict(self, X_std: np.ndarray, S_std: np.ndarray) -> np.ndarray:
         self.model.eval()
         with torch.no_grad():
@@ -446,7 +436,6 @@ class LMETrainer:
 
 # --------------------- Data + splits + metrics ---------------------
 def load_with_preprocessor(hp: HParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
-    # Locate CSV
     for p in ["src/data/sub_sample.csv", "data/src/sub_sample.csv", "data/sub_sample.csv", "sub_sample.csv"]:
         if os.path.exists(p):
             csv_path = p; break
@@ -463,85 +452,27 @@ def load_with_preprocessor(hp: HParams) -> Tuple[np.ndarray, np.ndarray, np.ndar
         clean_df, target="LOG_PRICE", clip_ppsqft_quantile=0.995
     )
 
-    # Try to get raw SQFT from features if not explicitly in extras
+    # Try to find SQFT in features (common names)
     sqft_idx = None
     sqft_names = {"SQFT", "SQUARE_FEET", "LIVING_AREA", "TOTAL_SQFT", "FINISHED_SQ_FT", "AREA_SQFT"}
-    if "feature_names" in extras:
-        fn = np.array(extras["feature_names"])
-    else:
-        fn = np.array(feature_names)
+    fn = np.array(extras.get("feature_names", feature_names))
     for nm in fn:
         if str(nm).upper() in sqft_names:
             sqft_idx = int(np.where(fn == nm)[0][0]); break
 
-    SQFT_raw = None
     if sqft_idx is not None:
         SQFT_raw = X_raw[:, sqft_idx].astype(np.float64)
         extras["SQFT_RAW"] = SQFT_raw
 
-    # Standardize param features (keep means for test)
+    # Standardize param features
     x_mean = X_raw.mean(axis=0, keepdims=True)
     x_std = X_raw.std(axis=0, keepdims=True) + 1e-9
     X_std = (X_raw - x_mean) / x_std
 
-    extras["x_mean"] = x_mean; extras["x_std"] = x_std; extras["feature_names"] = feature_names
+    extras["x_mean"] = x_mean
+    extras["x_std"] = x_std
+    extras["feature_names"] = feature_names
     return X_std.astype(np.float32), y_log_price.astype(np.float32), X_raw.astype(np.float32), extras
-
-
-def build_surface_and_splits(
-    X_std: np.ndarray,
-    X_raw: np.ndarray,
-    y_log_price: np.ndarray,
-    extras: Dict[str, Any],
-    hp: HParams
-) -> Tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-    np.ndarray, np.ndarray, KernelSurface, Optional[LaplacianOp],
-    Dict[str, Any]
-]:
-    # Prefer LAT/LON
-    spatial = extras.get("spatial")
-    spatial_cols = extras.get("spatial_cols", [])
-    if spatial is None or spatial.size == 0 or "LATITUDE" not in spatial_cols or "LONGITUDE" not in spatial_cols:
-        raise RuntimeError("LATITUDE / LONGITUDE not found in extras['spatial']; can't do spatial split.")
-
-    lat_idx = spatial_cols.index("LATITUDE")
-    lon_idx = spatial_cols.index("LONGITUDE")
-    S_all_deg = spatial[:, [lat_idx, lon_idx]].astype(np.float32)
-
-    # Drop rows with NaN lat/lon
-    valid = ~np.isnan(S_all_deg).any(axis=1)
-    if not valid.all() and hp.verbose:
-        print(f"[split] dropping {(~valid).sum()} rows with NaN lat/lon")
-    X_std = X_std[valid]; X_raw = X_raw[valid]
-    y_log_price = y_log_price[valid]; S_all_deg = S_all_deg[valid]
-
-    # Spatial TRAIN/TEST split by coarse grid cells
-    train_mask, test_mask = spatial_grid_split(S_all_deg, test_size=hp.test_size, seed=hp.random_state)
-    if hp.verbose:
-        print(f"[split] train size: {train_mask.sum()}, test size: {test_mask.sum()}")
-
-    X_tr, X_te = X_std[train_mask], X_std[test_mask]
-    Xr_tr, Xr_te = X_raw[train_mask], X_raw[test_mask]
-    y_tr_lp, y_te_lp = y_log_price[train_mask], y_log_price[test_mask]
-    S_tr_deg, S_te_deg = S_all_deg[train_mask], S_all_deg[test_mask]
-
-    # meters projection using TRAIN reference latitude
-    lat0_rad = float(np.deg2rad(S_tr_deg[:, 0]).mean())
-    S_tr_m = latlon_to_xy_meters(S_tr_deg, lat0_rad)
-    S_te_m = latlon_to_xy_meters(S_te_deg, lat0_rad)
-
-    # standardize surface by TRAIN stats
-    S_tr_std, S_te_std, s_mean, s_std = standardize_by_train(S_tr_m, S_te_m)
-
-    # Build surface + Laplacian operator (on TRAIN only)
-    surf = KernelSurface(S_tr_std, K=hp.K, q=hp.q)
-    lap = LaplacianOp(surf, K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None
-
-    meta = {"lat0_rad": lat0_rad, "s_mean": s_mean, "s_std": s_std, "spatial_cols": ["LATITUDE", "LONGITUDE"]}
-
-    return X_tr, X_te, Xr_tr, Xr_te, y_tr_lp, y_te_lp, S_tr_std, S_te_std, train_mask, test_mask, surf, lap, meta
 
 
 def spatial_grid_split(S_deg: np.ndarray, test_size=0.2, seed=42) -> Tuple[np.ndarray, np.ndarray]:
@@ -573,10 +504,10 @@ def standardize_by_train(X_tr: np.ndarray, X_te: np.ndarray) -> Tuple[np.ndarray
     return (X_tr - mean) / std, (X_te - mean) / std, mean, std
 
 
-def make_inner_spatial_val(S_tr_deg_like: np.ndarray, frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+def make_inner_spatial_val(S_tr_deg: np.ndarray, frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray]:
     """Spatial VAL split inside TRAIN."""
-    n = S_tr_deg_like.shape[0]
-    lat, lon = S_tr_deg_like[:, 0], S_tr_deg_like[:, 1]
+    n = S_tr_deg.shape[0]
+    lat, lon = S_tr_deg[:, 0], S_tr_deg[:, 1]
     lat_bins = np.linspace(lat.min(), lat.max(), 61)
     lon_bins = np.linspace(lon.min(), lon.max(), 61)
     lat_id = np.digitize(lat, lat_bins) - 1
@@ -611,36 +542,124 @@ def price_metrics_from_logs(y_log_true: np.ndarray, y_log_pred: np.ndarray) -> D
     }
 
 
+def pretty_table(title: str, metrics: Dict[str, float]) -> str:
+    rows = [
+        ("< 5% within", f"{metrics['within_5']*100:6.2f}%"),
+        ("< 10% within", f"{metrics['within_10']*100:6.2f}%"),
+        ("< 15% within", f"{metrics['within_15']*100:6.2f}%"),
+        ("Median abs rel", f"{metrics['median_abs_rel']:.4f}"),
+    ]
+    width = max(len(r[0]) for r in rows) + 2
+    s = []
+    s.append(f"\n{title}\n" + "-" * (len(title)))
+    for k, v in rows:
+        s.append(f"{k:<{width}} {v}")
+    return "\n".join(s)
+
+
+# --------------- Build surface + splits (returns valid mask) ---------------
+def build_surface_and_splits(
+    X_std: np.ndarray,
+    X_raw: np.ndarray,
+    y_log_price: np.ndarray,
+    extras: Dict[str, Any],
+    hp: HParams
+) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray,
+    KernelSurface, Optional[LaplacianOp],
+    Dict[str, Any]
+]:
+    spatial = extras.get("spatial")
+    spatial_cols = extras.get("spatial_cols", [])
+    if spatial is None or spatial.size == 0 or "LATITUDE" not in spatial_cols or "LONGITUDE" not in spatial_cols:
+        raise RuntimeError("LATITUDE / LONGITUDE not found in extras['spatial']; can't do spatial split.")
+
+    lat_idx = spatial_cols.index("LATITUDE")
+    lon_idx = spatial_cols.index("LONGITUDE")
+    S_all_deg = spatial[:, [lat_idx, lon_idx]].astype(np.float32)
+
+    # Drop rows with NaN lat/lon
+    valid = ~np.isnan(S_all_deg).any(axis=1)
+    if not valid.all() and hp.verbose:
+        print(f"[split] dropping {(~valid).sum()} rows with NaN lat/lon")
+    X_std = X_std[valid]; X_raw = X_raw[valid]
+    y_log_price = y_log_price[valid]; S_all_deg = S_all_deg[valid]
+
+    # Spatial TRAIN/TEST split by coarse grid cells
+    train_mask, test_mask = spatial_grid_split(S_all_deg, test_size=hp.test_size, seed=hp.random_state)
+    if hp.verbose:
+        print(f"[split] train size: {train_mask.sum()}, test size: {test_mask.sum()}")
+
+    X_tr, X_te = X_std[train_mask], X_std[test_mask]
+    Xr_tr, Xr_te = X_raw[train_mask], X_raw[test_mask]
+    y_tr_lp, y_te_lp = y_log_price[train_mask], y_log_price[test_mask]
+    S_tr_deg, S_te_deg = S_all_deg[train_mask], S_all_deg[test_mask]
+
+    # meters projection using TRAIN reference latitude
+    lat0_rad = float(np.deg2rad(S_tr_deg[:, 0]).mean())
+    S_tr_m = latlon_to_xy_meters(S_tr_deg, lat0_rad)
+    S_te_m = latlon_to_xy_meters(S_te_deg, lat0_rad)
+
+    # standardize surface by TRAIN stats
+    S_tr_std, S_te_std, s_mean, s_std = standardize_by_train(S_tr_m, S_te_m)
+
+    # Build surface + Laplacian operator (on TRAIN)
+    surf = KernelSurface(S_tr_std, K=hp.K, q=hp.q)
+    lap = LaplacianOp(surf, K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None
+
+    meta = {
+        "valid_mask": valid,
+        "lat0_rad": lat0_rad,
+        "s_mean": s_mean,
+        "s_std": s_std,
+        "spatial_cols": ["LATITUDE", "LONGITUDE"],
+        "S_tr_deg": S_tr_deg,
+        "S_te_deg": S_te_deg,
+    }
+
+    return (X_tr, X_te, Xr_tr, Xr_te,
+            y_tr_lp, y_te_lp,
+            S_tr_std, S_te_std, S_tr_deg, S_te_deg,
+            train_mask, test_mask,
+            surf, lap, meta)
+
+
 # --------------------- Main ---------------------
 if __name__ == "__main__":
-    import math
-
-    hp = HParams()  # use defaults as discussed
+    # Repro
+    hp = HParams()
+    np.random.seed(hp.random_state)
+    torch.manual_seed(hp.random_state)
 
     # 1) load & preprocess
     X_std_all, y_log_price_all, X_raw_all, extras = load_with_preprocessor(hp)
     if hp.verbose:
         print(f"[data] parametric X shape: {X_std_all.shape}, y shape: {y_log_price_all.shape}")
 
-    # 2) spatial split & surface
-    (X_tr, X_te, Xr_tr, Xr_te, y_tr_lp, y_te_lp,
-     S_tr_std, S_te_std, train_mask, test_mask, surf, lap, meta) = build_surface_and_splits(
+    # 2) spatial split & surface (returns TRAIN/TEST + valid mask)
+    (X_tr, X_te, Xr_tr, Xr_te,
+     y_tr_lp, y_te_lp,
+     S_tr_std, S_te_std, S_tr_deg, S_te_deg,
+     train_mask, test_mask,
+     surf_full, lap_full, meta) = build_surface_and_splits(
         X_std_all, X_raw_all, y_log_price_all, extras, hp
     )
 
-    # 3) choose target: PPSQFT (preferred) or LOG_PRICE
-    SQFT_tr = extras.get("SQFT_RAW", None)
-    if SQFT_tr is None:
-        # Try to recover SQFT from raw TRAIN subset by name index if available
-        pass  # we already tried above; nothing else to do here
+    # Align any side arrays to 'valid' BEFORE slicing by train/test
+    valid = meta["valid_mask"]
+    SQFT_all = extras.get("SQFT_RAW", None)
+    if SQFT_all is not None:
+        SQFT_all = np.asarray(SQFT_all)
+        if SQFT_all.shape[0] != valid.shape[0]:
+            raise ValueError(f"SQFT_RAW length {SQFT_all.shape[0]} != valid mask length {valid.shape[0]}")
+        SQFT_all = SQFT_all[valid]  # <-- alignment
 
-    use_ppsqft = SQFT_tr is not None
-    if use_ppsqft:
-        # extract SQFT for train/test from global mask
-        SQFT_all = extras["SQFT_RAW"]
+    # 3) choose target: PPSQFT (preferred) or LOG_PRICE fallback
+    if SQFT_all is not None:
         SQFT_tr = SQFT_all[train_mask]; SQFT_te = SQFT_all[test_mask]
-
-        # transform to log_ppsqft
         sqft_tr_safe = np.clip(SQFT_tr, 1.0, 1e12)
         sqft_te_safe = np.clip(SQFT_te, 1.0, 1e12)
         y_tr = (y_tr_lp - np.log(sqft_tr_safe)).astype(np.float32)
@@ -649,35 +668,26 @@ if __name__ == "__main__":
         # sample weights by PPSQFT quantiles (linear space)
         ppsqft_tr = to_ppsqft_from_logs(y_tr_lp, SQFT_tr)
         q50, q90 = np.quantile(ppsqft_tr, [0.5, 0.9])
-        w_tr = np.ones_like(ppsqft_tr, dtype=np.float32)
-        w_tr[ppsqft_tr >= q50] *= 1.2
-        w_tr[ppsqft_tr >= q90] *= 1.6
+        w_tr_full = np.ones_like(ppsqft_tr, dtype=np.float32)
+        w_tr_full[ppsqft_tr >= q50] *= 1.2
+        w_tr_full[ppsqft_tr >= q90] *= 1.6
         target_name = "PPSQFT"
     else:
-        print("[warn] SQFT missing/unusable; using LOG_PRICE target.")
+        print("[warn] SQFT missing/unusable in extras; using LOG_PRICE target instead of PPSQFT.")
         y_tr = y_tr_lp.astype(np.float32)
         y_te = y_te_lp.astype(np.float32)
-        w_tr = np.ones_like(y_tr, dtype=np.float32)
+        w_tr_full = np.ones_like(y_tr, dtype=np.float32)
         target_name = "LOG_PRICE"
 
-    # 4) INNER spatial VAL split inside TRAIN (for M-step early stop)
-    #    We re-use original degrees coords from train_mask subset to pick cells.
-    #    Recover TRAIN lat/lon degrees for split: inverse standardization not needed for split.
-    #    (We approximate using the standardized meters back to "like" degrees layout by reusing the same mask on raw spatial.)
-    spatial = extras.get("spatial"); spatial_cols = extras.get("spatial_cols", [])
-    lat_idx = spatial_cols.index("LATITUDE"); lon_idx = spatial_cols.index("LONGITUDE")
-    S_all_deg = spatial[:, [lat_idx, lon_idx]]
-    S_tr_deg = S_all_deg[train_mask]
+    # 4) INNER spatial VAL split inside TRAIN for early stopping
     tr_inner_mask, val_mask = make_inner_spatial_val(S_tr_deg, frac=hp.inner_val_frac, seed=hp.random_state)
 
     X_tr_in, X_val = X_tr[tr_inner_mask], X_tr[val_mask]
     y_tr_in, y_val = y_tr[tr_inner_mask], y_tr[val_mask]
-    w_tr_in = w_tr[tr_inner_mask]
-
-    # Corresponding surface rows (already std): TRAIN uses S_tr_std
+    w_tr_in = w_tr_full[tr_inner_mask]
     S_tr_in_std, S_val_std = S_tr_std[tr_inner_mask], S_tr_std[val_mask]
 
-    # 5) model + trainer
+    # 5) model + trainer on INNER-TRAIN
     model = IntrinsicPriceNet(in_dim=X_tr.shape[1], hidden=hp.hidden_layers, dropout_prob=hp.dropout_prob)
     surf_in = KernelSurface(S_tr_in_std, K=hp.K, q=hp.q)
     lap_in = LaplacianOp(surf_in, K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None
@@ -685,37 +695,27 @@ if __name__ == "__main__":
     trainer = LMETrainer(
         X_tr=X_tr_in, y_tr=y_tr_in, w_tr=w_tr_in,
         S_tr_std=S_tr_in_std, S_val_std=S_val_std,
-        model=model, surf=KernelSurface(S_tr_in_std, K=hp.K, q=hp.q),
-        lap=LaplacianOp(KernelSurface(S_tr_in_std, K=hp.K, q=hp.q), K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None,
-        hp=hp
+        model=model, surf=surf_in, lap=lap_in, hp=hp
     )
 
-    # 6) fit
+    # 6) fit on INNER-TRAIN with VAL early stop
     history = trainer.fit(X_val=X_val, y_val=y_val)
 
-    # 7) evaluate on full TRAIN (outer) and TEST
-    # Build a surface object on FULL TRAIN (std) for inference
-    surf_full = KernelSurface(S_tr_std, K=hp.K, q=hp.q)
-    trainer_full = trainer  # reuse model and D trained on inner-train; D length matches inner-train only
-    # For fairness, recompute D for FULL TRAIN with current model and then predict
-    # (Cheap alternative: predict using inner-train D; here we solve once on FULL TRAIN)
-    # ---- Refit D on full TRAIN (single E-step) ----
-    # Assemble a temp trainer for FULL TRAIN E-step with same model weights
+    # 7) one final E-step on FULL TRAIN (recompute D) using the learned W
     tmp = LMETrainer(
-        X_tr=X_tr, y_tr=y_tr, w_tr=w_tr,
-        S_tr_std=S_tr_std, S_val_std=S_val_std[:1],  # dummy val
-        model=model, surf=surf_full, lap=LaplacianOp(surf_full, K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None,
-        hp=hp
+        X_tr=X_tr, y_tr=y_tr, w_tr=w_tr_full,
+        S_tr_std=S_tr_std, S_val_std=S_tr_std[:1],  # dummy VAL
+        model=model, surf=surf_full,
+        lap=lap_full, hp=hp
     )
     tmp.U_list = surf_full.build_U_list()
-    tmp._update_D()  # one E-step at the end
+    tmp._update_D()  # single E-step to get D for full train
 
-    # TRAIN predictions (full train)
+    # TRAIN/TEST predictions
     y_pred_tr = tmp.predict(X_tr, S_tr_std).astype(np.float64)
-    # TEST predictions: standardize test surface already done as S_te_std
     y_pred_te = tmp.predict(X_te, S_te_std).astype(np.float64)
 
-    # Metrics (log space -> price or ppsqft space absolute-relative)
+    # Metrics (log space -> price or ppsqft absolute-relative)
     tr_metrics = price_metrics_from_logs(y_tr, y_pred_tr)
     te_metrics = price_metrics_from_logs(y_te, y_pred_te)
 

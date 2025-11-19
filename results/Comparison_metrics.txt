@@ -1,5 +1,5 @@
 ZIP×MONTH TAB-MTL QUANTILE MODEL – RESULTS SUMMARY
-==================================================
+
 
 1. MAIN HOLDOUT PERFORMANCE (last 1–2 months)
 ---------------------------------------------
