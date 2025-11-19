@@ -679,6 +679,9 @@ if __name__ == "__main__":
 
     # 5) model + trainer
     model = IntrinsicPriceNet(in_dim=X_tr.shape[1], hidden=hp.hidden_layers, dropout_prob=hp.dropout_prob)
+    surf_in = KernelSurface(S_tr_in_std, K=hp.K, q=hp.q)
+    lap_in = LaplacianOp(surf_in, K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None
+
     trainer = LMETrainer(
         X_tr=X_tr_in, y_tr=y_tr_in, w_tr=w_tr_in,
         S_tr_std=S_tr_in_std, S_val_std=S_val_std,
