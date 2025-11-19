@@ -1,28 +1,20 @@
-# src/lme_model.py
-# --------------------------------------------------------
-# Latent Manifold Estimation (Chopra et al. style)
-# Two trainable components:
-#   1) Parametric intrinsic price model  G(W, x)
-#   2) Non-parametric desirability model H(D, x)
-# Plus an EM-like outer loop to learn both.
-#
-# Assumes there is a CSV at one of:
-#   - "src/data/sub_sample.csv"
-#   - "data/src/sub_sample.csv"
-#   - "data/sub_sample.csv"
-#   - "sub_sample.csv"
-#
-# You can run:  python -m src.lme_model
-# after adjusting paths/column names.
-# --------------------------------------------------------
+# lme_model.py
+# ============================================================
+# Latent Manifold Estimation (paper-aligned) with:
+# - PPSQFT target (preferred) or LOG_PRICE (fallback)
+# - Spatial splits + inner spatial VAL for early stopping
+# - KDTree surface in meters w/ adaptive RBF bandwidth
+# - Weighted E- and M- steps, Laplacian smoothing on D (optional)
+# - BatchNorm+Dropout intrinsic net, warmup+cosine LR
+# ============================================================
 from __future__ import annotations
 
 import os
-from typing import List, Tuple, Optional, Literal, Dict
+import math
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict, Any
 
 import numpy as np
-import pandas as pd
-
 import torch
 from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
@@ -47,7 +39,10 @@ class HParams:
     mstep_epochs: int = 12
     patience: int = 10                  # M-step early stop on VAL (full energy)
 
-from src.data_preprocessor import DataPreprocessor  # both in src/
+    # Optimizer
+    batch_size: int = 512
+    lr: float = 5e-4
+    weight_decay: float = 5e-4
 
     # Surface / neighbors
     K: int = 40                         # neighbors for desirability interpolation
@@ -76,11 +71,7 @@ from src.data_preprocessor import DataPreprocessor  # both in src/
 
 # --------------------- Intrinsic Price Network ---------------------
 class IntrinsicPriceNet(nn.Module):
-    """
-    G(W, x): parametric model that predicts the intrinsic log-price m_i
-    We keep it close to the paper: 2 hidden layers (80, 40) → 1 output.
-    """
-    def __init__(self, in_dim: int, h1: int = 80, h2: int = 40):
+    def __init__(self, in_dim: int, hidden: Tuple[int, ...], dropout_prob: float = 0.0):
         super().__init__()
         mods: List[nn.Module] = []
         last = in_dim
@@ -95,26 +86,11 @@ class IntrinsicPriceNet(nn.Module):
         self.net = nn.Sequential(*mods)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)  # (batch,) not (batch,1)
+        return self.net(x).squeeze(-1)
 
-# ========================================================
-# 2. NON-PARAMETRIC SURFACES
-# ========================================================
-# ========================================================
-# 2. NON-PARAMETRIC SURFACES (KD-tree version)
-# ========================================================
- # make sure scikit-learn is installed
 
-# ----------------------------
-# 2. NON-PARAMETRIC BASE
-# ----------------------------
-class BaseDesirabilitySurface:
-    """
-    Common utilities for H(D, x):
-    - compute K nearest neighbours
-    - compute kernel weights
-    We always return a *sparse* representation of U_i:
-       U_i = (indices, weights) so that h_i = sum_j weights[j] * d[indices[j]]
+# --------------------- KD-tree surface (meters) ---------------------
+def latlon_to_xy_meters(latlon: np.ndarray, lat0_rad: float) -> np.ndarray:
     """
     latlon: (n,2) with columns [LAT, LON] in degrees
     lat0_rad: reference latitude (radians), use TRAIN mean
@@ -127,9 +103,6 @@ class BaseDesirabilitySurface:
     y = R * (lat - lat0_rad)
     return np.c_[y, x].astype(np.float32)
 
-        # precompute pairwise distances once (O(n^2)), fine for sub_sample.csv
-        # then keep top-K per point
-        self.nn_indices = self._build_all_neighbors()
 
 class KernelSurface:
     """
@@ -158,31 +131,13 @@ class KernelSurface:
         s = w.sum() + 1e-12
         return w / s
 
-    # helper for prediction time
-    def interpolate_one(self, x_new: np.ndarray, D: np.ndarray) -> float:
-        """
-        Simple kernel interpolation of D for a *new* point x_new
-        using training X as support.
-        """
-        d2 = np.sum((self.X - x_new) ** 2, axis=1)
-        neigh_idx = np.argsort(d2)[: self.K]
-        w = np.exp(-self.q * d2[neigh_idx])
-        w = w / (w.sum() + 1e-12)
-        return float(np.dot(w, D[neigh_idx]))
-
-# ----------------------------
-# 2a. KERNEL-BASED VERSION
-# ----------------------------
-class KernelDesirabilitySurface(BaseDesirabilitySurface):
-    """
-    H(D, x_i) = sum_{j in N(i)} Ker(x_i, x_j) * d_j
-    exactly eq. (1)-(2) from the paper.
-    """
     def build_U_list(self) -> List[Tuple[np.ndarray, np.ndarray]]:
-        U_list = []
+        U: List[Tuple[np.ndarray, np.ndarray]] = []
         for i in range(self.n):
-            x_i = self.X[i]
-            neigh_idx = self.nn_indices[i]
+            idxs, d2 = self._neighbors(i)
+            w = self._adapt_weights(d2)
+            U.append((idxs, w.astype(np.float32)))
+        return U
 
     def interpolate_one(self, x_new_std: np.ndarray, D: np.ndarray) -> float:
         # query neighbors in TRAIN space
@@ -192,9 +147,6 @@ class KernelDesirabilitySurface(BaseDesirabilitySurface):
         w = self._adapt_weights(d2)
         return float(np.dot(w, D[ind].astype(np.float64)))
 
-            weights = self._kernel_weights(x_i, neigh_idx)
-            U_list.append((neigh_idx, weights))
-        return U_list
 
 # --------------------- Graph Laplacian (optional) ---------------------
 class LaplacianOp:
@@ -219,459 +171,438 @@ class LaplacianOp:
             w = w / (w.sum() + 1e-12)
             self.lap_list.append((idxs.astype(np.int32), w.astype(np.float32)))
 
-            # Design matrix Z = [1, x_j]
-            ones = np.ones((X_neigh.shape[0], 1))
-            Z = np.concatenate([ones, X_neigh], axis=1)  # (k, d+1)
-
-            # Weighted least squares to get the linear map from d_neigh → h_i
-            # theta = (Z^T W Z)^-1 Z^T W d_neigh
-            # h_i = [1, x_i]^T theta
-            #    = [1, x_i]^T (Z^T W Z)^-1 Z^T W d_neigh
-            # Let B = [1, x_i]^T (Z^T W Z)^-1 Z^T W  => shape (1, k)
-            W = np.diag(w)
-            ZTW = Z.T @ W
-            M = ZTW @ Z  # (d+1, d+1)
-            # regularize a bit for numerical stability
-            M = M + 1e-6 * np.eye(M.shape[0])
-            M_inv = np.linalg.inv(M)
-            xi_aug = np.concatenate([[1.0], x_i])  # (d+1,)
-            B = xi_aug @ M_inv @ ZTW  # (k,)
-
-            # B are the coefficients a_ij in eq. (5)
-            U_list.append((neigh_idx, B))
-        return U_list
+    def apply(self, v: np.ndarray) -> np.ndarray:
+        out = np.zeros_like(v, dtype=np.float64)
+        for i, (idxs, w) in enumerate(self.lap_list):
+            vi = v[i]
+            out[i] += np.sum(w * (vi - v[idxs]))
+        return out
 
 
-# ----------------------------
-# 3. CONJUGATE GRADIENT FOR D
-# ----------------------------
-def cg_solve(
-    apply_A,
-    b: np.ndarray,
-    x0: Optional[np.ndarray] = None,
-    tol: float = 1e-4,
-    max_iter: int = 500,
-) -> np.ndarray:
-    """
-    Conjugate gradient on A x = b, where A is given as a matrix-free operator.
-    """
+# --------------------- Conjugate Gradient (QP) ---------------------
+def cg_solve_qp(apply_A, b: np.ndarray, x0: Optional[np.ndarray] = None,
+                rel_tol: float = 1e-5, max_iter: int = 300, patience: int = 10):
     n = b.shape[0]
-    x = np.zeros(n) if x0 is None else x0.copy()
+    x = np.zeros(n, dtype=np.float64) if x0 is None else x0.astype(np.float64).copy()
     r = b - apply_A(x)
     p = r.copy()
     r0 = np.linalg.norm(r) + 1e-12
     rsold = np.dot(r, r)
 
-    for _ in range(max_iter):
+    def obj(xv: np.ndarray) -> float:
+        Ax = apply_A(xv)
+        return 0.5 * float(np.dot(xv, Ax)) - float(np.dot(b, xv))
+
+    best_obj = np.inf
+    stale = 0
+
+    for k in range(max_iter):
         Ap = apply_A(p)
-        alpha = rsold / (np.dot(p, Ap) + 1e-12)
+        denom = np.dot(p, Ap) + 1e-18
+        alpha = rsold / denom
         x = x + alpha * p
         r = r - alpha * Ap
         rsnew = np.dot(r, r)
-        if np.sqrt(rsnew) < tol:
-            break
-        p = r + (rsnew / (rsold + 1e-12)) * p
+
+        rel_res = float(np.sqrt(rsnew) / r0)
+        J = obj(x)
+        if J + 1e-12 < best_obj:
+            best_obj, stale = J, 0
+        else:
+            stale += 1
+
+        if rel_res <= rel_tol or stale >= patience:
+            return x
+        p = r + (rsnew / (rsold + 1e-18)) * p
         rsold = rsnew
     return x
 
-    hist["iters"] = max_iter
-    return x, hist
 
-# ----------------------------
-# 4. LME TRAINER
-# ----------------------------
+# --------------------- Trainer ---------------------
 class LMETrainer:
-    """
-    Orchestrates the 2-phase optimization:
-    Phase 1: solve for D using fixed G(W, .)
-    Phase 2: train G with fixed D
-    """
     def __init__(
         self,
-        X_np: np.ndarray,
-        y_np: np.ndarray,
+        X_tr: np.ndarray,               # standardized param (TRAIN)
+        y_tr: np.ndarray,               # TRAIN target in log space (log_ppsqft or log_price)
+        w_tr: np.ndarray,               # TRAIN sample weights (>=0)
+        S_tr_std: np.ndarray,           # TRAIN surface std
+        S_val_std: np.ndarray,          # VAL surface std
         model: IntrinsicPriceNet,
-        surface: BaseDesirabilitySurface,
-        model: IntrinsicPriceNet,
-        reg_r: float = 1e-2,
-        device: str = "cpu",
-        zpid: Optional[np.ndarray] = None,
+        surf: KernelSurface,
+        lap: Optional[LaplacianOp],
+        hp: HParams,
     ):
-        self.X_np = X_np
-        self.y_np = y_np
-        self.n = X_np.shape[0]
+        self.X_tr = X_tr
+        self.y_tr = y_tr
+        self.w_tr = w_tr.astype(np.float32)
+        self.S_tr_std = S_tr_std
+        self.S_val_std = S_val_std
+        self.model = model.to(hp.device)
+        self.surf = surf
+        self.lap = lap
+        self.hp = hp
 
-        self.model = model.to(device)
-        self.surface = surface
-        self.model = model.to(device)
-        self.reg_r = reg_r
-        self.device = device
+        self.n = X_tr.shape[0]
+        self.D = np.zeros(self.n, dtype=np.float64)  # desirabilities
 
-        # initialize desirability vector D = [d1 ... dn]
-        self.D = np.zeros(self.n, dtype=np.float64)
+        # Precompute neighbor weights for TRAIN once
+        self.U_list = self.surf.build_U_list()
 
-    # ---------- Phase 1: update D ----------
-    def _update_D(self, U_list: List[Tuple[np.ndarray, np.ndarray]], m_np: np.ndarray):
-        """
-        Solve:
-            L(D) = r/2 ||D||^2 + 1/2 sum_i (y_i - (m_i + U_i^T D))^2
-        → (r I + sum_i U_i U_i^T) D = sum_i (y_i - m_i) U_i
-        We'll build b and a matrix-free A·v.
-        """
-        n = self.n
-        y = self.y_np
-        r = self.reg_r
+    # ---------- utilities ----------
+    def _compute_h(self, D: np.ndarray, U_list: List[Tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
+        h = np.zeros(self.n, dtype=np.float64)
+        for i, (idxs, w) in enumerate(U_list):
+            h[i] = float(np.dot(D[idxs], w))
+        return h
 
-        # build b
-        b = np.zeros(n, dtype=np.float64)
-        for i, (idxs, weights) in enumerate(U_list):
-            residual = y[i] - m_np[i]
-            b[idxs] += residual * weights
+    def _h_on_val(self, D: np.ndarray) -> np.ndarray:
+        # interpolate D (TRAIN) on VAL coordinates using TRAIN KDTree
+        h_val = [self.surf.interpolate_one(sv, D) for sv in self.S_val_std]
+        return np.array(h_val, dtype=np.float64)
 
-        # matrix-free A·v
+    def _pretrain(self) -> List[float]:
+        if self.hp.verbose:
+            print(f"[pretrain] starting for {self.hp.warmup_epochs} epochs...")
+        ds = TensorDataset(
+            torch.from_numpy(self.X_tr).float(),
+            torch.from_numpy(self.y_tr).float(),
+            torch.from_numpy(self.w_tr).float(),
+        )
+        loader = DataLoader(ds, batch_size=self.hp.batch_size, shuffle=True)
+        opt = torch.optim.AdamW(self.model.parameters(), lr=self.hp.lr, weight_decay=self.hp.weight_decay)
+        loss_fn = nn.MSELoss(reduction="none")
+        losses: List[float] = []
+
+        for ep in range(self.hp.warmup_epochs):
+            running, wsum = 0.0, 0.0
+            for xb, yb, wb in loader:
+                xb = xb.to(self.hp.device); yb = yb.to(self.hp.device); wb = wb.to(self.hp.device)
+                pred = self.model(xb)
+                per = loss_fn(pred, yb) * wb
+                denom = wb.sum().clamp_min(1e-6)
+                loss = per.sum() / denom
+                opt.zero_grad(); loss.backward(); opt.step()
+                running += per.sum().item(); wsum += float(denom)
+            avg = running / max(1e-6, wsum)
+            losses.append(float(avg))
+            if self.hp.verbose:
+                print(f"[pretrain] epoch {ep+1}/{self.hp.warmup_epochs} - loss: {avg:.4f}")
+        return losses
+
+    # ---------- E-step: solve D with CG (weighted + Laplacian + gauge) ----------
+    def _update_D(self):
+        y = self.y_tr
+        w = self.w_tr.astype(np.float64)
+        r = float(self.hp.reg_r)
+
+        X_t = torch.from_numpy(self.X_tr).float().to(self.hp.device)
+        with torch.no_grad():
+            m_np = self.model(X_t).cpu().numpy().astype(np.float64)
+
+        # b = sum_i w_i (y_i - m_i) U_i
+        b = np.zeros(self.n, dtype=np.float64)
+        for i, (idxs, weights) in enumerate(self.U_list):
+            b[idxs] += float(w[i]) * (y[i] - m_np[i]) * weights.astype(np.float64)
+
+        # A v = r v + sum_i w_i (U_i U_i^T) v + λ L v
+        lap = self.lap
+        lam = float(self.hp.lap_lambda) if lap is not None else 0.0
+
         def apply_A(v: np.ndarray) -> np.ndarray:
             out = r * v
-            for idxs, weights in U_list:
-                # (U_i^T v)
-                coeff = np.dot(v[idxs], weights)
-                out[idxs] += coeff * weights
+            for i, (idxs, weights) in enumerate(self.U_list):
+                coeff = float(np.dot(v[idxs], weights.astype(np.float64)))
+                out[idxs] += w[i] * coeff * weights.astype(np.float64)
+            if lam > 0.0:
+                out += lam * lap.apply(v)
             return out
 
-        D_new = cg_solve(apply_A, b, x0=self.D, tol=1e-4, max_iter=300)
+        D_new = cg_solve_qp(
+            apply_A, b, x0=self.D,
+            rel_tol=self.hp.cg_rel_tol,
+            max_iter=self.hp.cg_max_iter,
+            patience=self.hp.cg_patience
+        )
+        # gauge: mean-zero to keep m vs h identifiable
+        D_new -= D_new.mean()
         self.D = D_new
 
-    # ---------- Phase 2: update W (parametric) ----------
-    def _update_W(
-        self,
-        X_t: torch.Tensor,
-        y_t: torch.Tensor,
-        U_list: List[Tuple[np.ndarray, np.ndarray]],
-        batch_size: int = 64,
-        epochs: int = 5,
-        lr: float = 1e-3,
-    ):
-        dataset = TensorDataset(X_t, y_t)
-        # IMPORTANT: keep shuffle=False so we can slice h_all by position
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    # ---------- M-step: train W on residuals with spatial VAL early-stop ----------
+    def _mstep(self, X_val: np.ndarray, y_val: np.ndarray) -> List[float]:
+        # Precompute h on TRAIN and VAL with current D
+        h_tr = self._compute_h(self.D, self.U_list).astype(np.float32)
+        h_val = self._h_on_val(self.D).astype(np.float32)
 
-        optim = torch.optim.Adam(self.model.parameters(), lr=lr)
+        ds_tr = TensorDataset(
+            torch.from_numpy(self.X_tr).float(),
+            torch.from_numpy(self.y_tr).float(),
+            torch.from_numpy(h_tr).float(),
+            torch.from_numpy(self.w_tr).float()
+        )
+        loader = DataLoader(ds_tr, batch_size=self.hp.batch_size, shuffle=False)
 
-        # we need fast access to h_i = U_i^T D for all i
-        h_all = np.zeros(self.n, dtype=np.float32)
-        for i, (idxs, weights) in enumerate(U_list):
-            h_all[i] = np.dot(weights, self.D[idxs])
-        h_all_t = torch.from_numpy(h_all).to(self.device)
+        opt = torch.optim.AdamW(self.model.parameters(), lr=self.hp.lr, weight_decay=self.hp.weight_decay)
+        loss_fn = nn.MSELoss(reduction="none")
 
-        for _ in range(epochs):
-            for batch_idx, (xb, yb) in enumerate(loader):
-                xb = xb.to(self.device)
-                yb = yb.to(self.device)
+        # simple warmup+cosine across mstep_epochs
+        def lr_factor(epoch: int) -> float:
+            warm = min(1.0, (epoch + 1) / max(1, self.hp.warmup_epochs))
+            prog = max(0.0, (epoch + 1 - self.hp.warmup_epochs) / max(1, self.hp.mstep_epochs - self.hp.warmup_epochs))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * prog))
+            return warm * cosine
 
-                # indices of this batch in original array
-                # (DataLoader shuffles, but dataset is sequential, so we can get it like this)
-                start = batch_idx * batch_size
-                end = start + xb.size(0)
-                h_b = h_all_t[start:end]
+        best_val = float("inf")
+        wait = 0
+        losses: List[float] = []
+        best_state = None
 
-                m_b = self.model(xb)
-                pred_b = m_b + h_b
-                loss = 0.5 * torch.mean((yb - pred_b) ** 2)
+        X_val_t = torch.from_numpy(X_val).float().to(self.hp.device)
+        y_val_t = torch.from_numpy(y_val).float().to(self.hp.device)
+        h_val_t = torch.from_numpy(h_val).float().to(self.hp.device)
 
-                optim.zero_grad()
-                loss.backward()
-                optim.step()
+        for ep in range(self.hp.mstep_epochs):
+            for g in opt.param_groups:
+                g["lr"] = self.hp.lr * lr_factor(ep)
 
-                start = end  # move window
+            running, wsum = 0.0, 0.0
+            self.model.train()
+            for xb, yb, hb, wb in loader:
+                xb = xb.to(self.hp.device); yb = yb.to(self.hp.device)
+                hb = hb.to(self.hp.device); wb = wb.to(self.hp.device)
+                # residual target
+                y_res = yb - hb
+                pred_m = self.model(xb)
+                per = loss_fn(pred_m, y_res) * wb
+                denom = wb.sum().clamp_min(1e-6)
+                loss = per.sum() / denom
+                opt.zero_grad(); loss.backward(); opt.step()
+                running += per.sum().item(); wsum += float(denom)
 
-    # ------------------ Outer loop ------------------
-    def fit(self, outer_iters: int = 4):
-        X_t = torch.from_numpy(self.X_param).float().to(self.device)
-        y_t = torch.from_numpy(self.y).float().to(self.device)
+            avg = running / max(1e-6, wsum)
+            losses.append(float(avg))
+            if self.hp.verbose:
+                print(f"[m-step] epoch {ep+1}/{self.hp.mstep_epochs} - loss: {avg:.6f}")
 
-        # we’ll log stuff in here
-        em_losses: list[float] = []
-        train_losses_per_iter: list[list[float]] = []
-
-        # 1) pretrain like your notebook
-        pretrain_losses = self._pretrain_model(X_t, y_t, epochs=3)
-
-        best_loss = float("inf")
-
-        for it in range(outer_iters):
-            # 1) build U_i from current surface definition
-            U_list = self.surface.build_U_list()
-
-            # 2) forward pass through param model to get m_i
+            # ---- VAL check: full energy on VAL (y_val - (m_val + h_val)) ----
+            self.model.eval()
             with torch.no_grad():
-                m_t = self.model(X_t).cpu().numpy()
+                m_val = self.model(X_val_t)
+                full_res = y_val_t - (m_val + h_val_t)
+                val_energy = 0.5 * torch.mean(full_res ** 2).item()
 
-            # 3) phase 1: update D
-            self._update_D(U_list, m_t)
+            if val_energy + 1e-6 < best_val:
+                best_val, wait = val_energy, 0
+                best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+            else:
+                wait += 1
+                if wait >= self.hp.patience:
+                    if self.hp.verbose:
+                        print("[m-step] early stopping (VAL)")
+                    break
 
-            # 4) phase 2: update W
-            self._update_W(X_t, y_t, U_list, epochs=5)
+        # restore best
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
 
-            # debug
+        return losses
+
+    def fit(self, X_val: np.ndarray, y_val: np.ndarray) -> Dict[str, Any]:
+        history = {"pretrain_losses": [], "em_losses": [], "mstep_losses_per_iter": []}
+
+        history["pretrain_losses"] = self._pretrain()
+
+        for it in range(self.hp.em_iters):
+            if self.hp.verbose:
+                print(f"[em] iteration {it+1}/{self.hp.em_iters}")
+
+            # E-step: D
+            self._update_D()
+
+            # M-step: W with inner VAL early-stop
+            m_losses = self._mstep(X_val, y_val)
+            history["mstep_losses_per_iter"].append(m_losses)
+
+            # report train energy after this EM iteration
             with torch.no_grad():
-                m_t2 = self.model(X_t).cpu().numpy()
-            # build h_i for train set and print loss
-            h_np = np.zeros(self.n, dtype=np.float64)
-            for i, (idxs, weights) in enumerate(U_list):
-                h_np[i] = np.dot(self.D[idxs], weights)
-            preds = m_np2 + h_np
-            energy = 0.5 * np.mean((self.y - preds) ** 2)
-            print(f"[outer {it+1}] training energy = {energy:.6f}")
+                m_tr = self.model(torch.from_numpy(self.X_tr).float().to(self.hp.device)).cpu().numpy()
+            h_tr = self._compute_h(self.D, self.U_list)
+            energy = 0.5 * np.mean((self.y_tr - (m_tr + h_tr)) ** 2)
+            history["em_losses"].append(float(energy))
+            if self.hp.verbose:
+                print(f"[em]   loss: {energy:.6f}  |  improvement: "
+                      f"{(history['em_losses'][-2] - energy):.6f}" if len(history["em_losses"]) > 1 else
+                      f"[em]   loss: {energy:.6f}  |  improvement: inf")
 
-    def predict(self, X_new: np.ndarray) -> np.ndarray:
-        """
-        Predict on new rows.
-        - X_new: parametric features (same as training X_param)
-        - surf_X_new: surface features (e.g. lat/lon) for new rows;
-                      if None, we fall back to using X_new in surface space.
-        """
+        return history
+
+    # Predict on any standardized surface coords (uses TRAIN KDTree)
+    def predict(self, X_std: np.ndarray, S_std: np.ndarray) -> np.ndarray:
         self.model.eval()
         with torch.no_grad():
-            m_new = self.model(torch.from_numpy(X_new).float().to(self.device)).cpu().numpy()
-
-        # for simplicity, we reuse the surface’s X to interpolate
-        preds = []
-        for x in X_new:
-            # naive: do kernel interpolation on the fly (kernel version)
-            # if you're using LLR, you'd need to call the LLR builder again with x
-            neigh_idx = np.argsort(np.sum((self.surface.X - x) ** 2, axis=1))[: self.surface.K]
-            neigh_idx = neigh_idx[neigh_idx != -1]
-            w = self.surface._kernel_weights(x, neigh_idx)
-            h = np.dot(w, self.D[neigh_idx])
-            preds.append(h)
-        preds = np.array(preds)
-        return m_new + preds
-
-        h_new = []
-        for x in surf_X_new:
-            h_new.append(self.surface.interpolate_one(x, self.D))
-        h_new = np.array(h_new, dtype=np.float32)
-        return m_new + h_new
+            m = self.model(torch.from_numpy(X_std).float().to(self.hp.device)).cpu().numpy()
+        h = np.array([self.surf.interpolate_one(s, self.D) for s in S_std], dtype=np.float64)
+        return m + h
 
 
-# ========================================================
-# 5. DATA LOADING VIA OUR PREPROCESSOR
-# ========================================================
-@dataclass
-class HParams:
-    test_size: float = 0.20
-    random_state: int = 42
-    em_iters: int = 6
-    warmup_epochs: int = 5
-    mstep_epochs: int = 3
-    batch_size: int = 512
-    lr: float = 1e-3
-    weight_decay: float = 0.0 # (not used by default Adam)
-    K: int = 25
-    q: float = 0.20
-    device: str = "cpu"
-    verbose: bool = True
-    max_train_rows: Optional[int] = None  # keep None to use all
-
-
-def load_with_preprocessor() -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    """
-    Find the CSV, run Snowflake-like preprocessing, and return:
-      - X_param  (for NN)
-      - y        (log-price)
-      - extras   (zpid, spatial, etc.)
-    """
-    candidate_paths = [
-        "src/data/sub_sample.csv",
-        "data/src/sub_sample.csv",
-        "data/sub_sample.csv",
-        "sub_sample.csv",
-    ]
-    csv_path = None
-    for p in candidate_paths:
+# --------------------- Data + splits + metrics ---------------------
+def load_with_preprocessor(hp: HParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    # Locate CSV
+    for p in ["src/data/sub_sample.csv", "data/src/sub_sample.csv", "data/sub_sample.csv", "sub_sample.csv"]:
         if os.path.exists(p):
-            csv_path = p
-            break
-    if csv_path is None:
+            csv_path = p; break
+    else:
         raise FileNotFoundError("Could not find sub_sample.csv in expected locations.")
 
     pre = DataPreprocessor(dataset_path=csv_path)
-    raw_df = pre.load_data()               # raw CSV
+    raw_df = pre.load_data()
     clean_df = pre.clean_and_engineer(raw_df)
-    clean_df = clean_df.sample(n=10000, random_state = 42)
-    X_param, y, feature_names, extras = pre.prepare_features(
-        clean_df,
-        target="LOG_PRICE",  # match your Snowflake LME which log-priced
-        clip_ppsqft_quantile=0.995,
+    if hp.max_rows is not None and len(clean_df) > hp.max_rows:
+        clean_df = clean_df.sample(n=hp.max_rows, random_state=hp.random_state)
+
+    X_raw, y_log_price, feature_names, extras = pre.prepare_features(
+        clean_df, target="LOG_PRICE", clip_ppsqft_quantile=0.995
     )
-    return X_param, y, extras
 
-    # simple standardization
-    mean = X.mean(axis=0, keepdims=True)
-    std = X.std(axis=0, keepdims=True) + 1e-9
-    X_std = (X - mean) / std
+    # Try to get raw SQFT from features if not explicitly in extras
+    sqft_idx = None
+    sqft_names = {"SQFT", "SQUARE_FEET", "LIVING_AREA", "TOTAL_SQFT", "FINISHED_SQ_FT", "AREA_SQFT"}
+    if "feature_names" in extras:
+        fn = np.array(extras["feature_names"])
+    else:
+        fn = np.array(feature_names)
+    for nm in fn:
+        if str(nm).upper() in sqft_names:
+            sqft_idx = int(np.where(fn == nm)[0][0]); break
 
-    return X_std, y
+    SQFT_raw = None
+    if sqft_idx is not None:
+        SQFT_raw = X_raw[:, sqft_idx].astype(np.float64)
+        extras["SQFT_RAW"] = SQFT_raw
 
-    return X_param_std, y, extras
+    # Standardize param features (keep means for test)
+    x_mean = X_raw.mean(axis=0, keepdims=True)
+    x_std = X_raw.std(axis=0, keepdims=True) + 1e-9
+    X_std = (X_raw - x_mean) / x_std
 
-
-# ========================================================
-# 5b. SPATIAL TRAIN/TEST SPLIT
-# ========================================================
-def spatial_train_test_split(
-    spatial: np.ndarray,
-    test_frac: float = 0.2,
-    min_cells: int = 30,
-    random_state: int = 42,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Simple spatial split:
-    - bin lat/lon into a grid
-    - pick cells for test until we hit ~test_frac
-    If everything collapses into one cell (common!), we fall back to random split.
-    """
-    rng = np.random.default_rng(random_state)
-
-    n, d = spatial.shape
-    if d < 2:
-        # caller will probably fallback anyway
-        idx = np.arange(n)
-        rng.shuffle(idx)
-        cut = int(test_frac * n)
-        return idx[cut:], idx[:cut]
-
-    lat = spatial[:, 0]
-    lon = spatial[:, 1]
-
-    n_bins = 20
-    lat_bins = np.linspace(lat.min(), lat.max(), n_bins + 1)
-    lon_bins = np.linspace(lon.min(), lon.max(), n_bins + 1)
-
-    lat_ids = np.digitize(lat, lat_bins) - 1
-    lon_ids = np.digitize(lon, lon_bins) - 1
-
-    cells: Dict[Tuple[int, int], list[int]] = {}
-    for i, (la, lo) in enumerate(zip(lat_ids, lon_ids)):
-        key = (la, lo)
-        cells.setdefault(key, []).append(i)
-
-    cell_keys = list(cells.keys())
-    rng.shuffle(cell_keys)
-
-    test_idx: list[int] = []
-    target = test_frac * n
-
-    for ck in cell_keys:
-        test_idx.extend(cells[ck])
-        if len(test_idx) >= target and len(test_idx) >= min_cells:
-            break
-
-    test_idx = np.array(test_idx, dtype=np.int64)
-    mask = np.ones(n, dtype=bool)
-    mask[test_idx] = False
-    train_idx = np.where(mask)[0]
-
-    # 👇 safety: if everything went to test, fallback to random
-    if len(train_idx) == 0 or len(test_idx) == 0:
-        idx = np.arange(n)
-        rng.shuffle(idx)
-        cut = int((1 - test_frac) * n)
-        return idx[:cut], idx[cut:]
-
-    return train_idx, test_idx
+    extras["x_mean"] = x_mean; extras["x_std"] = x_std; extras["feature_names"] = feature_names
+    return X_std.astype(np.float32), y_log_price.astype(np.float32), X_raw.astype(np.float32), extras
 
 
-
-# ========================================================
-# 6. MAIN SCRIPT
-# ========================================================
-if __name__ == "__main__":
-    # 1) load + preprocess
-    X_param, y, extras = load_with_preprocessor()
-    print(f"parametric X shape: {X_param.shape}, y shape: {y.shape}")
-
-    # 2) build a NaN-safe surface feature matrix
+def build_surface_and_splits(
+    X_std: np.ndarray,
+    X_raw: np.ndarray,
+    y_log_price: np.ndarray,
+    extras: Dict[str, Any],
+    hp: HParams
+) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, KernelSurface, Optional[LaplacianOp],
+    Dict[str, Any]
+]:
+    # Prefer LAT/LON
     spatial = extras.get("spatial")
     spatial_cols = extras.get("spatial_cols", [])
     if spatial is None or spatial.size == 0 or "LATITUDE" not in spatial_cols or "LONGITUDE" not in spatial_cols:
         raise RuntimeError("LATITUDE / LONGITUDE not found in extras['spatial']; can't do spatial split.")
 
-    if spatial is not None and spatial.size > 0:
-        # prefer just LATITUDE/LONGITUDE if both exist
-        if "LATITUDE" in spatial_cols and "LONGITUDE" in spatial_cols:
-            lat_idx = spatial_cols.index("LATITUDE")
-            lon_idx = spatial_cols.index("LONGITUDE")
-            X_surface = spatial[:, [lat_idx, lon_idx]].astype(np.float32).copy()
-        else:
-            X_surface = spatial.astype(np.float32).copy()
+    lat_idx = spatial_cols.index("LATITUDE")
+    lon_idx = spatial_cols.index("LONGITUDE")
+    S_all_deg = spatial[:, [lat_idx, lon_idx]].astype(np.float32)
 
-        # drop columns that are entirely NaN
-        keep_cols = ~np.isnan(X_surface).all(axis=0)
-        X_surface = X_surface[:, keep_cols]
+    # Drop rows with NaN lat/lon
+    valid = ~np.isnan(S_all_deg).any(axis=1)
+    if not valid.all() and hp.verbose:
+        print(f"[split] dropping {(~valid).sum()} rows with NaN lat/lon")
+    X_std = X_std[valid]; X_raw = X_raw[valid]
+    y_log_price = y_log_price[valid]; S_all_deg = S_all_deg[valid]
 
-        # fill remaining NaNs with column means
-        if np.isnan(X_surface).any():
-            col_means = np.nanmean(X_surface, axis=0)
-            rows, cols = np.where(np.isnan(X_surface))
-            X_surface[rows, cols] = col_means[cols]
-    else:
-        # fallback to parametric features for distance
-        mean = X_param.mean(axis=0, keepdims=True)
-        std = X_param.std(axis=0, keepdims=True) + 1e-9
-        X_surface_std = (X_param - mean) / std
+    # Spatial TRAIN/TEST split by coarse grid cells
+    train_mask, test_mask = spatial_grid_split(S_all_deg, test_size=hp.test_size, seed=hp.random_state)
+    if hp.verbose:
+        print(f"[split] train size: {train_mask.sum()}, test size: {test_mask.sum()}")
 
-    # 3) standardize surface features for KDTree
-    surf_mean = X_surface.mean(axis=0, keepdims=True)
-    surf_std = X_surface.std(axis=0, keepdims=True) + 1e-9
-    X_surface_std = (X_surface - surf_mean) / surf_std
-    print(f"[data] surface X shape (std): {X_surface_std.shape}")
+    X_tr, X_te = X_std[train_mask], X_std[test_mask]
+    Xr_tr, Xr_te = X_raw[train_mask], X_raw[test_mask]
+    y_tr_lp, y_te_lp = y_log_price[train_mask], y_log_price[test_mask]
+    S_tr_deg, S_te_deg = S_all_deg[train_mask], S_all_deg[test_mask]
 
-    # 4) build surface (kernel or LLR)
-    # surface = KernelDesirabilitySurface(X_surface_std, K=15, q=1.0)
-    surface = LLRDesirabilitySurface(X_surface_std, K=15, q=1.0)
+    # meters projection using TRAIN reference latitude
+    lat0_rad = float(np.deg2rad(S_tr_deg[:, 0]).mean())
+    S_tr_m = latlon_to_xy_meters(S_tr_deg, lat0_rad)
+    S_te_m = latlon_to_xy_meters(S_te_deg, lat0_rad)
 
-    # 5) build parametric model
-    model = IntrinsicPriceNet(in_dim=X_param.shape[1])
+    # standardize surface by TRAIN stats
+    S_tr_std, S_te_std, s_mean, s_std = standardize_by_train(S_tr_m, S_te_m)
 
-    # fallback: random split
-    idx_all = rng.permutation(n)
-    cutoff = int((1.0 - hp.test_size) * n)
-    train_idx = idx_all[:cutoff]
-    test_idx = idx_all[cutoff:]
+    # Build surface + Laplacian operator (on TRAIN only)
+    surf = KernelSurface(S_tr_std, K=hp.K, q=hp.q)
+    lap = LaplacianOp(surf, K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None
 
-    X_tr = X_param[train_idx]
-    X_te = X_param[test_idx]
-    y_tr = y[train_idx]
-    y_te = y[test_idx]
+    meta = {"lat0_rad": lat0_rad, "s_mean": s_mean, "s_std": s_std, "spatial_cols": ["LATITUDE", "LONGITUDE"]}
 
-    # use param X as surface
-    surf_tr_raw = X_tr.astype(np.float32)
-    surf_te_raw = X_te.astype(np.float32)
+    return X_tr, X_te, Xr_tr, Xr_te, y_tr_lp, y_te_lp, S_tr_std, S_te_std, train_mask, test_mask, surf, lap, meta
 
-    m_tr = surf_tr_raw.mean(axis=0, keepdims=True)
-    s_tr = surf_tr_raw.std(axis=0, keepdims=True) + 1e-9
-    surf_tr = (surf_tr_raw - m_tr) / s_tr
 
-    m_te = surf_te_raw.mean(axis=0, keepdims=True)
-    s_te = surf_te_raw.std(axis=0, keepdims=True) + 1e-9
-    surf_te = (surf_te_raw - m_te) / s_te
+def spatial_grid_split(S_deg: np.ndarray, test_size=0.2, seed=42) -> Tuple[np.ndarray, np.ndarray]:
+    n = S_deg.shape[0]
+    lat, lon = S_deg[:, 0], S_deg[:, 1]
+    lat_bins = np.linspace(lat.min(), lat.max(), 101)
+    lon_bins = np.linspace(lon.min(), lon.max(), 101)
+    lat_id = np.digitize(lat, lat_bins) - 1
+    lon_id = np.digitize(lon, lon_bins) - 1
+    cell = lat_id * 100 + lon_id
+    uniq = np.unique(cell)
+    rng = np.random.RandomState(seed)
+    rng.shuffle(uniq)
+    cut = int(test_size * len(uniq))
+    test_cells = set(uniq[:cut])
+    train_mask = ~np.isin(cell, list(test_cells))
+    test_mask = ~train_mask
+    if train_mask.sum() == 0 or test_mask.sum() == 0:
+        idx = rng.permutation(n)
+        cut = int((1 - test_size) * n)
+        train_mask = np.zeros(n, dtype=bool); train_mask[idx[:cut]] = True
+        test_mask = ~train_mask
+    return train_mask, test_mask
 
-    print(f"[split] train size: {len(train_idx)}, test size: {len(test_idx)}")
-    print(f"[data] surface train shape (std): {surf_tr.shape}")
-    print(f"[data] surface test shape (std): {surf_te.shape}")
 
-    return X_tr, X_te, y_tr, y_te, surf_tr, surf_te
+def standardize_by_train(X_tr: np.ndarray, X_te: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    mean = X_tr.mean(axis=0, keepdims=True)
+    std = X_tr.std(axis=0, keepdims=True) + 1e-9
+    return (X_tr - mean) / std, (X_te - mean) / std, mean, std
+
+
+def make_inner_spatial_val(S_tr_deg_like: np.ndarray, frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Spatial VAL split inside TRAIN."""
+    n = S_tr_deg_like.shape[0]
+    lat, lon = S_tr_deg_like[:, 0], S_tr_deg_like[:, 1]
+    lat_bins = np.linspace(lat.min(), lat.max(), 61)
+    lon_bins = np.linspace(lon.min(), lon.max(), 61)
+    lat_id = np.digitize(lat, lat_bins) - 1
+    lon_id = np.digitize(lon, lon_bins) - 1
+    cell = lat_id * 60 + lon_id
+    uniq = np.unique(cell)
+    rng = np.random.RandomState(seed + 123)
+    rng.shuffle(uniq)
+    cut = max(1, int(frac * len(uniq)))
+    val_cells = set(uniq[:cut])
+    val_mask = np.isin(cell, list(val_cells))
+    train_inner = ~val_mask
+    return train_inner, val_mask
+
 
 def to_ppsqft_from_logs(y_log_price: np.ndarray, sqft: np.ndarray) -> np.ndarray:
     price = np.exp(np.clip(y_log_price, -20.0, 20.0))
     sqft_safe = np.clip(sqft.astype(np.float64), 1.0, 1e12)
     return price / sqft_safe
 
-# =========================================================
-# 7. Metrics
-# =========================================================
-def compute_paper_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    abs_rel = np.abs(y_pred - y_true) / np.clip(y_true, 1e-9, None)
+
+def price_metrics_from_logs(y_log_true: np.ndarray, y_log_pred: np.ndarray) -> Dict[str, float]:
+    clip = 20.0
+    y_true = np.exp(np.clip(y_log_true, -clip, clip))
+    y_pred = np.exp(np.clip(y_log_pred, -clip, clip))
+    abs_rel = np.abs(y_pred - y_true) / (y_true + 1e-12)
     return {
         "within_5": float((abs_rel < 0.05).mean()),
         "within_10": float((abs_rel < 0.10).mean()),
@@ -680,234 +611,157 @@ def compute_paper_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, f
     }
 
 
-# =========================================================
-# 8. main
-# =========================================================
+# --------------------- Main ---------------------
 if __name__ == "__main__":
-    hparams = LMEHyperparams(
-        test_size=0.20,
-        random_state=42,
-        max_rows=None,          # set to 100_000 if you want a hard cap
-        em_iters=6,
-        warmup_epochs=2,
-        mstep_epochs=6,
-        patience=5,
-        batch_size=512,
-        lr=3e-4,
-        weight_decay=1e-4,
-        patience=3,
-        hidden_layers=(256, 128, 64, 32),
-        dropout_prob=0.1,
-        K=15,
-        q=1.0,
-        reg_r=1e-2,
-        hidden_layers=(80, 40),
-        dropout_prob=0.0,
-        device="cpu",
-        zpid=extras.get("zpid"),
-    )
+    import math
+
+    hp = HParams()  # use defaults as discussed
 
     # 1) load & preprocess
-    X_param_all, y_all, extras = load_with_preprocessor(hp)
+    X_std_all, y_log_price_all, X_raw_all, extras = load_with_preprocessor(hp)
     if hp.verbose:
-        print(f"[data] parametric X shape: {X_param_all.shape}, y shape: {y_all.shape}")
+        print(f"[data] parametric X shape: {X_std_all.shape}, y shape: {y_log_price_all.shape}")
 
-    # 2) surface matrix
-    X_surface_all, surf_cols = build_surface_matrix(extras, X_param_all)
-
-    # 3) spatial split
-    # drop rows with NaN in surface (should already be filled, but guard anyway)
-    mask_valid = ~np.isnan(X_surface_all).any(axis=1)
-    if not mask_valid.all() and hp.verbose:
-        print(f"[split] dropping {(~mask_valid).sum()} rows with NaN surface")
-    X_param_all = X_param_all[mask_valid]
-    y_all = y_all[mask_valid]
-    X_surface_all = X_surface_all[mask_valid]
-
-    train_mask, test_mask = spatial_train_test_split(X_surface_all, test_size=hp.test_size, seed=hp.random_state)
-    if hp.verbose:
-        print(f"[split] train size: {train_mask.sum()}, test size: {test_mask.sum()}")
-
-    X_tr, X_te = X_param_all[train_mask], X_param_all[test_mask]
-    y_tr, y_te = y_all[train_mask], y_all[test_mask]
-    S_tr, S_te = X_surface_all[train_mask], X_surface_all[test_mask]
-
-    # 4) lat/lon -> meters (only if we truly have lat/lon)
-    have_ll = surf_cols[:2] == ["LATITUDE", "LONGITUDE"]
-    if have_ll:
-        R = 6_371_000.0  # meters
-        lat_tr = np.deg2rad(S_tr[:, 0]); lon_tr = np.deg2rad(S_tr[:, 1])
-        lat0 = lat_tr.mean()
-        x_tr = R * (lon_tr - lon_tr.mean()) * np.cos(lat0)
-        y_tr_m = R * (lat_tr - lat0)
-        S_tr_m = np.c_[y_tr_m, x_tr].astype(np.float32)
-
-        lat_te = np.deg2rad(S_te[:, 0]); lon_te = np.deg2rad(S_te[:, 1])
-        x_te = R * (lon_te - lon_tr.mean()) * np.cos(lat0)  # anchor to TRAIN mean
-        y_te_m = R * (lat_te - lat0)
-        S_te_m = np.c_[y_te_m, x_te].astype(np.float32)
-
-    # use TRAIN means to anchor both train and test (prevents train/test shift)
-    lat0 = np.deg2rad(S_tr[:, 0]).mean()
-    lon0 = np.deg2rad(S_tr[:, 1]).mean()
-
-    # train → meters
-    lat_tr = np.deg2rad(S_tr[:, 0])
-    lon_tr = np.deg2rad(S_tr[:, 1])
-    x_tr = R * (lon_tr - lon0) * np.cos(lat0)
-    y_tr = R * (lat_tr - lat0)
-    S_tr_m = np.c_[y_tr, x_tr].astype(np.float32)
-
-    # 8) evaluate on the same 10k (since we sampled)
-    y_pred_log = trainer.predict(
-        X_new=X_param,
-        surf_X_new=X_surface_std,
+    # 2) spatial split & surface
+    (X_tr, X_te, Xr_tr, Xr_te, y_tr_lp, y_te_lp,
+     S_tr_std, S_te_std, train_mask, test_mask, surf, lap, meta) = build_surface_and_splits(
+        X_std_all, X_raw_all, y_log_price_all, extras, hp
     )
-    y_true_train = np.exp(y_train)
-    y_pred_train = np.exp(y_pred_log_train)
-    abs_rel_train = np.abs(y_pred_train - y_true_train) / y_true_train
-    print("\n=== Paper-style metrics (TRAIN) ===")
-    print(f"within 5%:  {(abs_rel_train < 0.05).mean():.4f}")
-    print(f"within 10%: {(abs_rel_train < 0.10).mean():.4f}")
-    print(f"within 15%: {(abs_rel_train < 0.15).mean():.4f}")
-    print(f"median abs rel: {np.median(abs_rel_train):.4f}")
 
+    # 3) choose target: PPSQFT (preferred) or LOG_PRICE
+    SQFT_tr = extras.get("SQFT_RAW", None)
+    if SQFT_tr is None:
+        # Try to recover SQFT from raw TRAIN subset by name index if available
+        pass  # we already tried above; nothing else to do here
+
+    use_ppsqft = SQFT_tr is not None
     if use_ppsqft:
-        sqft_tr = np.clip(sqft_all[train_mask], 1.0, None)
-        sqft_te = np.clip(sqft_all[test_mask], 1.0, None)
-        # log-ppsqft = log_price - log(sqft)
-        y_tr_pp = y_tr_raw - np.log(sqft_tr)
-        y_te_pp = y_te_raw - np.log(sqft_te)
-        # train-only clip in PPSQFT space
-        pp_clip = np.quantile(np.exp(y_tr_pp), 0.995)
-        y_tr = np.log(np.clip(np.exp(y_tr_pp), 0.0, pp_clip))
-        y_te = np.log(np.clip(np.exp(y_te_pp), 0.0, pp_clip))
-        extras["ppsqft_clip"] = float(pp_clip)
-        # sample weights from PPSQFT distribution
-        q50, q90 = np.quantile(np.exp(y_tr), [0.50, 0.90])
-        w_tr = np.ones_like(y_tr, dtype=np.float32)
-        w_tr[np.exp(y_tr) >= q50] = 1.2
-        w_tr[np.exp(y_tr) >= q90] = 1.6
-    else:
-        # LOG_PRICE target fallback
-        y_tr, y_te = y_tr_raw.copy(), y_te_raw.copy()
-        q50, q90 = np.quantile(np.exp(y_tr), [0.50, 0.90])
-        w_tr = np.ones_like(y_tr, dtype=np.float32)
-        w_tr[np.exp(y_tr) >= q50] = 1.2
-        w_tr[np.exp(y_tr) >= q90] = 1.6
-        sqft_tr = np.ones_like(y_tr)
-        sqft_te = np.ones_like(y_te)
+        # extract SQFT for train/test from global mask
+        SQFT_all = extras["SQFT_RAW"]
+        SQFT_tr = SQFT_all[train_mask]; SQFT_te = SQFT_all[test_mask]
 
-    # 5) Build model + trainer
-    model = IntrinsicPriceNet(in_dim=X_tr_std.shape[1])
+        # transform to log_ppsqft
+        sqft_tr_safe = np.clip(SQFT_tr, 1.0, 1e12)
+        sqft_te_safe = np.clip(SQFT_te, 1.0, 1e12)
+        y_tr = (y_tr_lp - np.log(sqft_tr_safe)).astype(np.float32)
+        y_te = (y_te_lp - np.log(sqft_te_safe)).astype(np.float32)
+
+        # sample weights by PPSQFT quantiles (linear space)
+        ppsqft_tr = to_ppsqft_from_logs(y_tr_lp, SQFT_tr)
+        q50, q90 = np.quantile(ppsqft_tr, [0.5, 0.9])
+        w_tr = np.ones_like(ppsqft_tr, dtype=np.float32)
+        w_tr[ppsqft_tr >= q50] *= 1.2
+        w_tr[ppsqft_tr >= q90] *= 1.6
+        target_name = "PPSQFT"
+    else:
+        print("[warn] SQFT missing/unusable; using LOG_PRICE target.")
+        y_tr = y_tr_lp.astype(np.float32)
+        y_te = y_te_lp.astype(np.float32)
+        w_tr = np.ones_like(y_tr, dtype=np.float32)
+        target_name = "LOG_PRICE"
+
+    # 4) INNER spatial VAL split inside TRAIN (for M-step early stop)
+    #    We re-use original degrees coords from train_mask subset to pick cells.
+    #    Recover TRAIN lat/lon degrees for split: inverse standardization not needed for split.
+    #    (We approximate using the standardized meters back to "like" degrees layout by reusing the same mask on raw spatial.)
+    spatial = extras.get("spatial"); spatial_cols = extras.get("spatial_cols", [])
+    lat_idx = spatial_cols.index("LATITUDE"); lon_idx = spatial_cols.index("LONGITUDE")
+    S_all_deg = spatial[:, [lat_idx, lon_idx]]
+    S_tr_deg = S_all_deg[train_mask]
+    tr_inner_mask, val_mask = make_inner_spatial_val(S_tr_deg, frac=hp.inner_val_frac, seed=hp.random_state)
+
+    X_tr_in, X_val = X_tr[tr_inner_mask], X_tr[val_mask]
+    y_tr_in, y_val = y_tr[tr_inner_mask], y_tr[val_mask]
+    w_tr_in = w_tr[tr_inner_mask]
+
+    # Corresponding surface rows (already std): TRAIN uses S_tr_std
+    S_tr_in_std, S_val_std = S_tr_std[tr_inner_mask], S_tr_std[val_mask]
+
+    # 5) model + trainer
+    model = IntrinsicPriceNet(in_dim=X_tr.shape[1], hidden=hp.hidden_layers, dropout_prob=hp.dropout_prob)
     trainer = LMETrainer(
-        X_param=X_tr_std,
-        y=y_tr,
-        surface=surface,
-        model=model,
-        reg_r=1e-1,
-        device=hp.device,
+        X_tr=X_tr_in, y_tr=y_tr_in, w_tr=w_tr_in,
+        S_tr_std=S_tr_in_std, S_val_std=S_val_std,
+        model=model, surf=KernelSurface(S_tr_in_std, K=hp.K, q=hp.q),
+        lap=LaplacianOp(KernelSurface(S_tr_in_std, K=hp.K, q=hp.q), K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None,
+        hp=hp
     )
 
-    # 6) Train (pretrain + EM)
-    history = trainer.fit(
-        outer_iters=hp.em_iters,
-        warmup_epochs=hp.warmup_epochs,
-        mstep_epochs=hp.mstep_epochs,
-        batch_size=hp.batch_size,
-        lr=hp.lr,
+    # 6) fit
+    history = trainer.fit(X_val=X_val, y_val=y_val)
+
+    # 7) evaluate on full TRAIN (outer) and TEST
+    # Build a surface object on FULL TRAIN (std) for inference
+    surf_full = KernelSurface(S_tr_std, K=hp.K, q=hp.q)
+    trainer_full = trainer  # reuse model and D trained on inner-train; D length matches inner-train only
+    # For fairness, recompute D for FULL TRAIN with current model and then predict
+    # (Cheap alternative: predict using inner-train D; here we solve once on FULL TRAIN)
+    # ---- Refit D on full TRAIN (single E-step) ----
+    # Assemble a temp trainer for FULL TRAIN E-step with same model weights
+    tmp = LMETrainer(
+        X_tr=X_tr, y_tr=y_tr, w_tr=w_tr,
+        S_tr_std=S_tr_std, S_val_std=S_val_std[:1],  # dummy val
+        model=model, surf=surf_full, lap=LaplacianOp(surf_full, K_lap=hp.K_lap or hp.K, q=hp.q) if hp.lap_lambda > 0 else None,
+        hp=hp
     )
     tmp.U_list = surf_full.build_U_list()
     tmp._update_D()  # one E-step at the end
 
-    # 7) Predictions (log-space)
-    y_pred_log_tr = trainer.predict(X_tr_std, surf_tr)
-    y_pred_log_te = trainer.predict(X_te_std, surf_te)
+    # TRAIN predictions (full train)
+    y_pred_tr = tmp.predict(X_tr, S_tr_std).astype(np.float64)
+    # TEST predictions: standardize test surface already done as S_te_std
+    y_pred_te = tmp.predict(X_te, S_te_std).astype(np.float64)
 
-    # Guard against overflow when exponentiating
-    y_pred_log_tr = np.clip(y_pred_log_tr, y_tr.min() - 1.0, y_tr.max() + 1.0)
-    y_pred_log_te = np.clip(y_pred_log_te, y_te.min() - 1.0, y_te.max() + 1.0)
+    # Metrics (log space -> price or ppsqft space absolute-relative)
+    tr_metrics = price_metrics_from_logs(y_tr, y_pred_tr)
+    te_metrics = price_metrics_from_logs(y_te, y_pred_te)
 
-    # 8) Paper-style metrics (TRAIN / TEST)
-    def summarize(name: str, y_log_true: np.ndarray, y_log_pred: np.ndarray):
-        y_true = np.exp(y_log_true)
-        y_pred = np.exp(y_log_pred)
-        abs_rel = np.abs(y_pred - y_true) / y_true
-        within_5  = (abs_rel < 0.05).mean()
-        within_10 = (abs_rel < 0.10).mean()
-        within_15 = (abs_rel < 0.15).mean()
-        med_err   = np.median(abs_rel)
-        print(f"\n=== Paper-style metrics ({name}) ===")
-        print(f"within 5%:  {within_5:.4f}")
-        print(f"within 10%: {within_10:.4f}")
-        print(f"within 15%: {within_15:.4f}")
-        print(f"median abs rel: {med_err:.4f}")
-        return y_true, y_pred, abs_rel
+    print(f"\n=== Paper-style metrics (TRAIN, {target_name}) ===")
+    print(f"within 5%:  {tr_metrics['within_5']:.4f}")
+    print(f"within 10%: {tr_metrics['within_10']:.4f}")
+    print(f"within 15%: {tr_metrics['within_15']:.4f}")
+    print(f"median abs rel: {tr_metrics['median_abs_rel']:.4f}")
 
-    # 9) plots like notebook — save to files (headless friendly)
+    print(f"\n=== Paper-style metrics (TEST, {target_name}) ===")
+    print(f"within 5%:  {te_metrics['within_5']:.4f}")
+    print(f"within 10%: {te_metrics['within_10']:.4f}")
+    print(f"within 15%: {te_metrics['within_15']:.4f}")
+    print(f"median abs rel: {te_metrics['median_abs_rel']:.4f}")
 
-    # 9a) EM loss curve
-    if "em_losses" in history and history["em_losses"]:
+    # 8) plots saved to files
+    if history.get("em_losses"):
         plt.figure(figsize=(6, 4))
         plt.plot(history["em_losses"], marker="o")
-        plt.title("EM iteration loss")
-        plt.xlabel("EM iteration")
-        plt.ylabel("loss")
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
+        plt.title("EM iteration loss (train energy on inner-train)")
+        plt.xlabel("EM iteration"); plt.ylabel("loss")
+        plt.grid(True, alpha=0.3); plt.tight_layout()
         plt.savefig("em_loss.png", dpi=150)
 
-    # 9b) M-step losses per EM
-    if "train_losses_per_iter" in history and history["train_losses_per_iter"]:
+    if history.get("mstep_losses_per_iter"):
         plt.figure(figsize=(6, 4))
-        for i, losses in enumerate(history["train_losses_per_iter"]):
+        for i, losses in enumerate(history["mstep_losses_per_iter"]):
             plt.plot(losses, label=f"EM {i+1}")
-        plt.title("M-step (NN) losses per EM")
-        plt.xlabel("epoch")
-        plt.ylabel("loss")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
+        plt.title("M-step (NN) losses per EM (inner-train)")
+        plt.xlabel("epoch"); plt.ylabel("loss"); plt.legend()
+        plt.grid(True, alpha=0.3); plt.tight_layout()
         plt.savefig("mstep_losses.png", dpi=150)
 
-    # 9c) predicted vs true
+    # TEST scatter
+    clip = 20.0
+    y_true_te = np.exp(np.clip(y_te, -clip, clip))
+    y_pred_te_lin = np.exp(np.clip(y_pred_te, -clip, clip))
     plt.figure(figsize=(6, 6))
-    plt.scatter(y_true, y_pred, s=4)
-    mn, mx = y_true.min(), y_true.max()
+    plt.scatter(y_true_te, y_pred_te_lin, s=4)
+    mn, mx = y_true_te.min(), y_true_te.max()
     plt.plot([mn, mx], [mn, mx], color="red")
-    plt.title("Predicted vs True Price")
-    plt.xlabel("True price")
-    plt.ylabel("Predicted price")
-    plt.tight_layout()
-    plt.savefig("pred_vs_true.png", dpi=150)
+    plt.title(f"Predicted vs True ({target_name}, TEST)")
+    plt.xlabel("True"); plt.ylabel("Pred")
+    plt.tight_layout(); plt.savefig("pred_vs_true_test.png", dpi=150)
 
-    # 9d) abs relative error hist
+    # TEST abs-rel hist
+    abs_rel = np.abs(y_pred_te_lin - y_true_te) / (y_true_te + 1e-12)
     plt.figure(figsize=(6, 4))
     plt.hist(abs_rel, bins=50)
-    plt.title("Absolute Relative Error")
-    plt.xlabel("abs_rel")
-    plt.ylabel("count")
-    plt.tight_layout()
-    plt.savefig("abs_rel_hist.png", dpi=150)
-
-    # 9e) optional desirability map if we have lat/lon
-    if extras.get("spatial") is not None and "LATITUDE" in spatial_cols and "LONGITUDE" in spatial_cols:
-        lat_idx = spatial_cols.index("LATITUDE")
-        lon_idx = spatial_cols.index("LONGITUDE")
-        coords = extras["spatial"]
-        plt.figure(figsize=(7, 5))
-        sc = plt.scatter(
-            coords[:, lon_idx],
-            coords[:, lat_idx],
-            c=trainer.D,
-            s=5,
-            cmap="viridis",
-            alpha=0.6,
-        )
-        plt.colorbar(sc, label="desirability (D)")
-        plt.title("Learned desirability field")
-        plt.xlabel("Longitude")
-        plt.ylabel("Latitude")
-        plt.tight_layout()
-        plt.savefig("desirability.png", dpi=150)
-
+    plt.title(f"Absolute Relative Error ({target_name}, TEST)")
+    plt.xlabel("abs_rel"); plt.ylabel("count")
+    plt.tight_layout(); plt.savefig("abs_rel_hist_test.png", dpi=150)

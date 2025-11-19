@@ -1,5 +1,5 @@
 # ============================================
-# IMPORTS & GLOBAL CONFIG
+# IMPORTS & GLOBAL CONFIG (LOCAL / PANDAS VERSION)
 # ============================================
 import os, gc, math, re, warnings, json, time, random
 from dataclasses import dataclass
@@ -11,19 +11,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from snowflake.snowpark.context import get_active_session
-from snowflake.snowpark.window import Window
-from snowflake.snowpark import Session, DataFrame as SnowparkDF
-from snowflake.snowpark import functions as F, types as T
-from snowflake.snowpark.functions import (
-    col as sp_col,
-    parse_json, flatten,
-    count, avg, sum as sf_sum,
-    max as sf_max, min as sf_min,
-    stddev_samp, sql_expr, when, lower, trim, to_date
-)
-from snowflake.snowpark.types import FloatType, StringType, BooleanType
-
 from scipy import stats
 
 import torch
@@ -32,26 +19,25 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 from tqdm.auto import tqdm
 
 from sklearn.metrics import (
-    mean_absolute_error, r2_score, roc_auc_score, log_loss
+    mean_absolute_error, r2_score
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from dateutil.relativedelta import relativedelta
 
 warnings.filterwarnings("ignore")
 
-session = get_active_session()
-RAW_TABLE = "APIFY_FOR_SALE_ENCODED_DEDUPED"
+# ----------------- LOCAL DATA CONFIG -----------------
+RAW_CSV_PATH       = "sub_sample.csv"   # <--- your local export of APIFY_FOR_SALE_ENCODED_DEDUPED
+MIN_START_DATE     = "2022-01-01"       # enforce 2022+
+HOLDOUT_DAYS       = 60
+MIN_SOLD_PER_ZIP_M = 20
+MIN_LIST_PER_ZIP_M = 40
+TOPK_HOMETYPES     = 6
+CHUNK_LIMIT_ROWS   = 800_000
+RANDOM_SEED        = 42
 
-# ----------------- CONFIG -----------------
-MIN_START_DATE      = '2022-01-01'  # enforce 2022+
-HOLDOUT_DAYS        = 60
-MIN_SOLD_PER_ZIP_M  = 20
-MIN_LIST_PER_ZIP_M  = 40
-TOPK_HOMETYPES      = 6
-CHUNK_LIMIT_ROWS    = 800_000
-RANDOM_SEED         = 42
-
-# ----------------- FEATURE CATALOGS -----------------
+# ----------------- FEATURE CATALOGS (same as original) -----------------
 KEY_COLS = [
     "ZPID","URL","STREETADDRESS","CITY","STATE","COUNTY","ZIPCODE",
     "FIPS","FIPSCODE","STATEFIPS","COUNTYFIPS",
@@ -146,10 +132,11 @@ EXPLICIT_DROPS = set(FREE_TEXT_EXCLUDE + VARIANT_COLS + KEY_COLS)
 NON_FEATURE_KEYS = {"ZIPCODE","YM","STATE_MODE","COUNTY_MODE","DAY_FOR_SPLIT"}
 
 # ============================================
-# HELPERS / METRICS
+# HELPERS / METRICS (LOCAL)
 # ============================================
 def downcast_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty: return df
+    if df.empty:
+        return df
     for c in df.columns:
         s = df[c]
         if pd.api.types.is_datetime64_any_dtype(s):
@@ -179,48 +166,51 @@ def pct_within(y_true, y_pred, pct=0.10):
     ok = np.abs(y_pred - y_true) <= (pct * np.abs(y_true))
     return float(np.mean(ok)) if len(ok) else np.nan
 
-# ---------- Snowpark-safe coercion gates ----------
-def safe_to_double(col):
-    s = F.to_varchar(col)
-    s = F.regexp_replace(s, r'[,\s\$%]', '')
-    return F.call_function("TRY_TO_DOUBLE", s)
+# ---------- Local safe coercion gates (pandas Series) ----------
+def safe_to_double(series: pd.Series) -> pd.Series:
+    """Clean strings like '1,234', '$123', '5%' → float."""
+    s = series.astype(str).str.replace(r'[,\s\$%]', '', regex=True)
+    return pd.to_numeric(s, errors="coerce")
 
-def safe_to_binary_from_text(col: F.Column) -> F.Column:
-    u = F.upper(F.to_varchar(col))
-    return (
-        F.iff(u.in_(F.lit("Y"),F.lit("YES"),F.lit("TRUE"),F.lit("T"),F.lit("1")), F.lit(1),
-        F.iff(u.in_(F.lit("N"),F.lit("NO"),F.lit("FALSE"),F.lit("F"),F.lit("0")), F.lit(0), F.lit(None)))
-    )
+def safe_to_binary_from_text(series: pd.Series) -> pd.Series:
+    u = series.astype(str).str.upper().str.strip()
+    mapping = {
+        "Y": 1, "YES": 1, "TRUE": 1, "T": 1, "1": 1,
+        "N": 0, "NO": 0, "FALSE": 0, "F": 0, "0": 0,
+    }
+    return u.map(mapping).astype("float32")
 
-def safe_to_binary_from_number(col: F.Column) -> F.Column:
-    x = safe_to_double(col)
-    return F.iff(x == F.lit(1), F.lit(1),
-           F.iff(x == F.lit(0), F.lit(0), F.lit(None)))
+def safe_to_binary_from_number(series: pd.Series) -> pd.Series:
+    x = safe_to_double(series)
+    out = pd.Series(np.nan, index=series.index, dtype="float32")
+    out[x == 1] = 1
+    out[x == 0] = 0
+    return out
 
 # ============================================
-# COMBINED EVENTS BUILDER
+# COMBINED EVENTS BUILDER (LOCAL PANDAS)
 # ============================================
 class CombinedEventsBuilder:
     """
-    Creates a time-series 'combined_events' Snowpark DataFrame:
-      - one row per PRICEHISTORY event per ZPID
-      - event columns are prefixed with 'evt_' to avoid name collisions
-      - joined to a single 'base snapshot' row per ZPID (latest by SCRAPEDAT if available)
+    LOCAL version:
+      - Input: pandas DataFrame with at least ZPID, PRICEHISTORY, SCRAPEDAT, ZIPCODE, STATE, COUNTY, etc.
+      - Output: pandas DataFrame with one row per PRICEHISTORY event per ZPID,
+        plus merged "base snapshot" of home attributes.
     """
 
     def __init__(
         self,
-        raw_table: str,
+        base_df: pd.DataFrame,
         zpid_col: str = "ZPID",
         pricehistory_col: str = "PRICEHISTORY",
         scrape_ts_col: str = "SCRAPEDAT"
     ):
-        self.raw_table = raw_table
+        self.base_df = base_df
         self.zpid_col = zpid_col
         self.pricehistory_col = pricehistory_col
         self.scrape_ts_col = scrape_ts_col
 
-        self.c_zpid_key     = "zpid_key"
+        self.c_zpid_key     = "ZPID_KEY"
         self.c_evt_date     = "evt_date"
         self.c_evt_ts       = "evt_ts"
         self.c_evt_type     = "evt_type"
@@ -239,30 +229,57 @@ class CombinedEventsBuilder:
         self.c_base_zpid     = "BASE_ZPID"
         self.c_base_zpid_key = "BASE_ZPID_KEY"
 
-    def build(self):
-        base = session.table(self.raw_table)
+    def build(self) -> pd.DataFrame:
+        base = self.base_df.copy()
         events = self._flatten_events(base)
         events = self._add_sequence(events)
         base_snap = self._make_base_snapshot(base)
-        combined = (
-            events.join(
-                base_snap,
-                events[self.c_zpid_key] == base_snap[self.c_base_zpid_key],
-                how="left",
-            )
-            .drop(self.c_base_zpid_key)
+        combined = events.merge(
+            base_snap,
+            left_on=self.c_zpid_key,
+            right_on=self.c_base_zpid_key,
+            how="left",
         )
+        if self.c_base_zpid_key in combined.columns:
+            combined = combined.drop(columns=[self.c_base_zpid_key])
         return combined
 
-    def _flatten_events(self, base_df):
-        base_core = (
-            base_df
-            .select(
-                F.col(self.zpid_col).alias(self.zpid_col),
-                F.parse_json(F.col(self.pricehistory_col)).alias("PH_JSON"),
-            )
-            .filter(F.col("PH_JSON").is_not_null())
-            .with_column(self.c_zpid_key, F.col(self.zpid_col).cast("string"))
+    def _flatten_events(self, base_df: pd.DataFrame) -> pd.DataFrame:
+        # ZPID + PRICEHISTORY only
+        cols = [c for c in base_df.columns if c in {self.zpid_col, self.pricehistory_col}]
+        base_core = base_df[cols].copy()
+        base_core = base_core[base_core[self.pricehistory_col].notna()]
+        base_core[self.c_zpid_key] = base_core[self.zpid_col].astype(str)
+
+        def parse_ph(x):
+            if isinstance(x, (list, dict)):
+                return x
+            if isinstance(x, str):
+                try:
+                    return json.loads(x)
+                except Exception:
+                    return np.nan
+            return np.nan
+
+        base_core["PH_JSON"] = base_core[self.pricehistory_col].apply(parse_ph)
+        base_core = base_core[base_core["PH_JSON"].notna()]
+
+        # explode list of events
+        flat = base_core.explode("PH_JSON").rename(columns={"PH_JSON": "VAL"})
+        flat["JSON_INDEX"] = flat.groupby(self.c_zpid_key).cumcount()
+        v = flat["VAL"]
+
+        def get_val(d, k, default=None):
+            return d.get(k, default) if isinstance(d, dict) else default
+
+        flat[self.c_evt_date] = pd.to_datetime(
+            v.apply(lambda d: get_val(d, "date", None)),
+            errors="coerce"
+        )
+        flat[self.c_evt_type] = v.apply(lambda d: str(get_val(d, "event", "")).lower())
+        flat[self.c_evt_price] = pd.to_numeric(
+            v.apply(lambda d: get_val(d, "price", None)),
+            errors="coerce"
         )
         flat[self.c_evt_price_psf] = pd.to_numeric(
             v.apply(lambda d: get_val(d, "pricePerSquareFoot", None)),
@@ -280,48 +297,45 @@ class CombinedEventsBuilder:
         )
         flat["RAW_TIME_MS_STR"] = v.apply(lambda d: get_val(d, "time", None))
 
-        ms_num  = F.call_function("TO_NUMBER", F.col("raw_time_ms_str"))
-        epoch0  = F.to_timestamp_ntz(F.lit("1970-01-01 00:00:00"))
-        evt_ts  = F.call_function("DATEADD", F.lit("millisecond"), ms_num, epoch0)
+        # event timestamp
+        ms = pd.to_numeric(flat["RAW_TIME_MS_STR"], errors="coerce")
+        evt_ts = pd.to_datetime(ms, unit="ms", origin="unix", errors="coerce")
+        flat[self.c_evt_ts] = evt_ts
 
-        flat = (
-            flat
-            .with_column(self.c_evt_ts, evt_ts)
-            .with_column(self.c_sort_ts, F.coalesce(F.col(self.c_evt_ts), F.to_timestamp_ntz(F.col(self.c_evt_date))))
-            .filter(
-                F.coalesce(F.col(self.c_evt_date).is_not_null(), F.col(self.c_evt_ts).is_not_null())
-            )
-        )
+        # sort_ts = evt_ts or evt_date
+        flat[self.c_sort_ts] = np.where(
+            flat[self.c_evt_ts].notna(),
+            flat[self.c_evt_ts],
+            flat[self.c_evt_date]
+        ).astype("datetime64[ns]")
+
+        flat = flat[(flat[self.c_evt_date].notna()) | (flat[self.c_evt_ts].notna())]
+        flat = flat.reset_index(drop=True)
         return flat
 
-    def _add_sequence(self, events_df):
-        w_order = Window.partition_by(self.c_zpid_key).order_by(
-            F.col(self.c_evt_date), F.col(self.c_sort_ts), F.col("json_index")
-        )
-        w_all = Window.partition_by(self.c_zpid_key)
+    def _add_sequence(self, events_df: pd.DataFrame) -> pd.DataFrame:
+        df = events_df.sort_values(
+            [self.c_zpid_key, self.c_evt_date, self.c_sort_ts, "JSON_INDEX"]
+        ).copy()
 
-        prev_ts  = F.lag(F.col(self.c_sort_ts), 1).over(w_order)
-        first_ts = F.min(F.col(self.c_sort_ts)).over(w_all)
+        df[self.c_event_seq] = df.groupby(self.c_zpid_key).cumcount() + 1
+        df["prev_ts"] = df.groupby(self.c_zpid_key)[self.c_sort_ts].shift(1)
+        df["first_ts"] = df.groupby(self.c_zpid_key)[self.c_sort_ts].transform("min")
 
-        return (
-            events_df
-            .with_column(self.c_event_seq, F.row_number().over(w_order))
-            .with_column(self.c_days_prev,  F.call_function("DATEDIFF", F.lit("day"), prev_ts,  F.col(self.c_sort_ts)))
-            .with_column(self.c_days_first, F.call_function("DATEDIFF", F.lit("day"), first_ts, F.col(self.c_sort_ts)))
-        )
+        df[self.c_days_prev] = (df[self.c_sort_ts] - df["prev_ts"]).dt.days
+        df[self.c_days_first] = (df[self.c_sort_ts] - df["first_ts"]).dt.days
 
-    def _make_base_snapshot(self, base_df):
-        cols_no_json: List[str] = [c for c in base_df.columns if c != self.pricehistory_col]
-        base_no_json = base_df.select([F.col(c) for c in cols_no_json])
+        df = df.drop(columns=["prev_ts", "first_ts"])
+        return df
+
+    def _make_base_snapshot(self, base_df: pd.DataFrame) -> pd.DataFrame:
+        cols_no_json = [c for c in base_df.columns if c != self.pricehistory_col]
+        base_no_json = base_df[cols_no_json].copy()
 
         if self.scrape_ts_col in base_no_json.columns:
-            scrape_ts = F.to_timestamp_ntz(F.col(self.scrape_ts_col).cast("string"))
-            w_latest = Window.partition_by(self.zpid_col).order_by(scrape_ts.desc_nulls_last())
-            base_latest = (
-                base_no_json
-                .with_column("_rnk", F.row_number().over(w_latest))
-                .filter(F.col("_rnk") == 1)
-                .drop("_rnk")
+            base_no_json[self.scrape_ts_col] = pd.to_datetime(
+                base_no_json[self.scrape_ts_col],
+                errors="coerce"
             )
             base_no_json = base_no_json.sort_values(
                 [self.zpid_col, self.scrape_ts_col],
@@ -329,18 +343,14 @@ class CombinedEventsBuilder:
             )
             base_latest = base_no_json.drop_duplicates(subset=[self.zpid_col], keep="first")
         else:
-            agg_exprs = [F.any_value(F.col(c)).alias(c) for c in cols_no_json if c != self.zpid_col]
-            base_latest = base_no_json.group_by(self.zpid_col).agg(*agg_exprs)
+            base_latest = base_no_json.drop_duplicates(subset=[self.zpid_col], keep="first")
 
-        base_latest = (
-            base_latest
-            .with_column_renamed(self.zpid_col, self.c_base_zpid)
-            .with_column(self.c_base_zpid_key, F.col(self.c_base_zpid).cast("string"))
-        )
+        base_latest = base_latest.rename(columns={self.zpid_col: self.c_base_zpid})
+        base_latest[self.c_base_zpid_key] = base_latest[self.c_base_zpid].astype(str)
         return base_latest
 
 # ============================================
-# ZIP×MONTH INDEX BUILDER
+# ZIP×MONTH INDEX BUILDER (LOCAL / PANDAS)
 # ============================================
 class ZipMonthIndexBuilder:
     """
@@ -349,28 +359,38 @@ class ZipMonthIndexBuilder:
       - Liquidity: N_SOLD, N_LIST, SOLD_MEDIAN, LIST_MEDIAN
       - Reliability: N_MONTHS_TO_DATE, W_H1_COMBINED
       - Pooling: county/state medians and relatives
-      - IDX_EFF: coalesce ZIP/COUNTY/STATE
-      - Labels: Y_H1, Y_H2 as Δlog on IDX_EFF
+      - IDX: coalesced effective index
+      - Labels: Y_H1, Y_H2 as Δlog on IDX
+      - Macro medians for WEEKLY_AVERAGE_MORTGAGE_RATE, UNEMPLOYMENT_RATE
     """
 
     def __init__(
         self,
-        combined_events: SnowparkDF,
+        combined_events: pd.DataFrame,
         min_start_date: str = "2022-01-01",
         min_sold_per_zip_m: int = 10,
         min_list_per_zip_m: int = 20,
     ):
+        # IMPORTANT: keep reference, don't copy the huge DF here
         self.ce = combined_events
         self.min_start_date = min_start_date
         self.min_sold = int(min_sold_per_zip_m)
         self.min_list = int(min_list_per_zip_m)
 
     def build(self) -> pd.DataFrame:
-        ce = self.ce.copy()
+        # Work on a narrowed copy to save RAM
+        needed_cols = [
+            "ZPID", "ZIPCODE", "STATE", "COUNTY",
+            "EVT_DATE", "evt_date",
+            "EVT_PRICE", "evt_price",
+            "EVT_TYPE", "evt_type",
+            "EVT_IS_RENTAL", "evt_is_rental",
+            "WEEKLY_AVERAGE_MORTGAGE_RATE", "UNEMPLOYMENT_RATE",
+        ]
+        keep = [c for c in needed_cols if c in self.ce.columns]
+        ce = self.ce[keep].copy()
 
-        # ---------------------------------
-        # Canonical event date
-        # ---------------------------------
+        # --- canonical event date ---
         if "EVT_DATE" in ce.columns:
             ce["EVT_DATE"] = pd.to_datetime(ce["EVT_DATE"], errors="coerce")
         elif "evt_date" in ce.columns:
@@ -381,48 +401,30 @@ class ZipMonthIndexBuilder:
         ce = ce[ce["EVT_DATE"].notna()]
         ce = ce[ce["EVT_DATE"] >= pd.to_datetime(self.min_start_date)]
 
-        # ---------------------------------
-        # Month index + split date
-        # ---------------------------------
+        print(f"[ZipMonthIndexBuilder] events after date filter: {len(ce):,}")
+
+        # --- month index & split date ---
         ce["YM"] = ce["EVT_DATE"].values.astype("datetime64[M]")
         ce["DAY_FOR_SPLIT"] = ce["EVT_DATE"]
 
-        # ---------------------------------
-        # Safe creation of ZIPCODE / STATE_MODE / COUNTY_MODE
-        # ---------------------------------
-        # ZIPCODE: if missing, fill with NA series
-        if "ZIPCODE" in ce.columns:
-            zip_series = ce["ZIPCODE"]
-        else:
-            zip_series = pd.Series(pd.NA, index=ce.index)
+        # --- geo keys ---
+        ce["ZIPCODE"] = ce.get("ZIPCODE", pd.Series(index=ce.index, dtype="object")).astype(str)
+        ce["STATE_MODE"] = ce.get("STATE", pd.Series(index=ce.index, dtype="object")).astype(str)
+        ce["COUNTY_MODE"] = ce.get("COUNTY", pd.Series(index=ce.index, dtype="object")).astype(str)
 
-        # STATE: if missing, fill with NA series
-        if "STATE" in ce.columns:
-            state_series = ce["STATE"]
-        else:
-            state_series = pd.Series(pd.NA, index=ce.index)
-
-        # COUNTY: if missing, fill with NA series
-        if "COUNTY" in ce.columns:
-            county_series = ce["COUNTY"]
-        else:
-            county_series = pd.Series(pd.NA, index=ce.index)
-
-        # Convert to string dtype; pd.NA is handled correctly inside a Series
-        ce["ZIPCODE"]     = zip_series.astype("string")
-        ce["STATE_MODE"]  = state_series.astype("string")
-        ce["COUNTY_MODE"] = county_series.astype("string")
-
-        # ---------------------------------
-        # Event type / price / rental flag
-        # ---------------------------------
+        # --- event type / rental ---
         price_col = "evt_price" if "evt_price" in ce.columns else "EVT_PRICE"
         evt_type_col = "evt_type" if "evt_type" in ce.columns else "EVT_TYPE"
-        rent_col = "evt_is_rental" if "evt_is_rental" in ce.columns else (
-            "EVT_IS_RENTAL" if "EVT_IS_RENTAL" in ce.columns else None
+        rent_col = (
+            "evt_is_rental" if "evt_is_rental" in ce.columns
+            else ("EVT_IS_RENTAL" if "EVT_IS_RENTAL" in ce.columns else None)
         )
 
-        ce["EVT_PRICE"] = pd.to_numeric(ce[price_col], errors="coerce")
+        # Clean price strings BEFORE to_numeric (key fix!)
+        raw_price = ce[price_col].astype(str)
+        clean_price = raw_price.str.replace(r"[,\s\$%]", "", regex=True)
+        ce["EVT_PRICE"] = pd.to_numeric(clean_price, errors="coerce")
+
         ce["EVT_TYPE"] = ce[evt_type_col].astype(str).str.lower()
 
         if rent_col is not None:
@@ -430,296 +432,66 @@ class ZipMonthIndexBuilder:
         else:
             ce["EVT_IS_RENTAL"] = False
 
-        # Filter out rentals
+        # --- filter out rentals ---
         ce_nr = ce[~ce["EVT_IS_RENTAL"]].copy()
         print(f"[ZipMonthIndexBuilder] non-rental events: {len(ce_nr):,}")
 
-        # see what EVT_TYPE actually looks like
+        # --- classify listing vs sold ---
+        listing_like = ce_nr["EVT_TYPE"].isin(
+            ["listing", "for sale", "listed for sale", "price change"]
+        )
+        sold_like = ce_nr["EVT_TYPE"].isin(["sold", "sale", "closed"])
+
         print("[ZipMonthIndexBuilder] EVT_TYPE sample:")
-        print(ce_nr["EVT_TYPE"].value_counts().head(15))
+        print(ce_nr["EVT_TYPE"].value_counts().head(10))
 
-        listing_like = F.col("EVT_TYPE").in_(
-            F.lit("listing"), F.lit("for sale"), F.lit("listed for sale"), F.lit("price change")
+        print(f"[ZipMonthIndexBuilder] listing_like rows: {listing_like.sum():,}")
+        print(f"[ZipMonthIndexBuilder] sold_like rows:    {sold_like.sum():,}")
+
+        keys = ["ZIPCODE", "STATE_MODE", "COUNTY_MODE", "YM"]
+
+        # Only use rows with a numeric price
+        has_price = ce_nr["EVT_PRICE"].notna()
+
+        sold_df = ce_nr[sold_like & has_price].groupby(keys, as_index=False).agg(
+            N_SOLD=("EVT_PRICE", "size"),
+            SOLD_MEDIAN=("EVT_PRICE", "median"),
         )
-        sold_like    = F.col("EVT_TYPE").in_(F.lit("sold"), F.lit("sale"), F.lit("closed"))
-
-        base = (
-            ce.filter(F.col("EVT_IS_RENTAL") == F.lit(False))
-              .group_by("ZIPCODE","STATE_MODE","COUNTY_MODE","YM")
-              .agg(
-                  F.sum(F.iff(sold_like & F.col("EVT_PRICE").is_not_null(), F.lit(1), F.lit(0))).alias("N_SOLD"),
-                  F.sum(F.iff(listing_like & F.col("EVT_PRICE").is_not_null(), F.lit(1), F.lit(0))).alias("N_LIST"),
-                  F.median(F.iff(sold_like & F.col("EVT_PRICE").is_not_null(), F.col("EVT_PRICE"), F.lit(None))).alias("SOLD_MEDIAN"),
-                  F.median(F.iff(listing_like & F.col("EVT_PRICE").is_not_null(), F.col("EVT_PRICE"), F.lit(None))).alias("LIST_MEDIAN"),
-              )
-              .with_column("IDX_RAW", F.coalesce(F.col("SOLD_MEDIAN"), F.col("LIST_MEDIAN")))
-        )
-
-        w_zip = Window.partition_by("ZIPCODE").order_by(F.col("YM"))
-        base = base.with_column("N_MONTHS_TO_DATE", F.row_number().over(w_zip))
-
-        n_tx = F.greatest(F.coalesce(F.col("N_SOLD"), F.lit(0)), F.coalesce(F.col("N_LIST"), F.lit(0)))
-        w_hist_raw = F.least(F.col("N_MONTHS_TO_DATE"), F.lit(24))
-        w_hist = F.greatest(
-            F.call_function("LN", w_hist_raw + F.lit(1.0)) / F.call_function("LN", F.lit(12.0) + F.lit(1.0)),
-            F.lit(0.2)
-        )
-        w_tx = F.greatest(F.call_function("LN", n_tx + F.lit(1.0)) / F.lit(3.0), F.lit(0.2))
-        base = base.with_column("W_H1_COMBINED", F.least(w_hist * w_tx, F.lit(1.0)))
-
-        county_base = (
-            base.group_by("COUNTY_MODE","YM")
-                .agg(F.median(F.col("IDX_RAW")).alias("IDX_COUNTY_MED"))
-        )
-        state_base = (
-            base.group_by("STATE_MODE","YM")
-                .agg(F.median(F.col("IDX_RAW")).alias("IDX_STATE_MED"))
+        list_df = ce_nr[listing_like & has_price].groupby(keys, as_index=False).agg(
+            N_LIST=("EVT_PRICE", "size"),
+            LIST_MEDIAN=("EVT_PRICE", "median"),
         )
 
-        agg = (
-            base.join(county_base, on=["COUNTY_MODE","YM"], how="left")
-                .join(state_base,  on=["STATE_MODE","YM"],  how="left")
-        )
-
-        agg = agg.with_column(
-            "IDX_EFF",
-            F.coalesce(F.col("IDX_RAW"), F.col("IDX_COUNTY_MED"), F.col("IDX_STATE_MED"))
-        )
-
-        agg = (
-            agg.with_column("IDX_REL_COUNTY",
-                F.iff(F.col("IDX_COUNTY_MED").is_not_null(), F.col("IDX_EFF")/F.col("IDX_COUNTY_MED"), F.lit(None)))
-               .with_column("IDX_REL_STATE",
-                F.iff(F.col("IDX_STATE_MED").is_not_null(),  F.col("IDX_EFF")/F.col("IDX_STATE_MED"),  F.lit(None)))
-        )
-
-        idx_eff_lead1 = F.lead(F.col("IDX_EFF"), 1).over(w_zip)
-        idx_eff_lead2 = F.lead(F.col("IDX_EFF"), 2).over(w_zip)
-        agg = (
-            agg
-            .with_column("IDX_FUTURE_H1", idx_eff_lead1)
-            .with_column("IDX_FUTURE_H2", idx_eff_lead2)
-            .with_column("Y_H1",
-                F.call_function("LN", F.col("IDX_FUTURE_H1") + F.lit(1.0)) - F.call_function("LN", F.col("IDX_EFF") + F.lit(1.0)))
-            .with_column("Y_H2",
-                F.call_function("LN", F.col("IDX_FUTURE_H2") + F.lit(1.0)) - F.call_function("LN", F.col("IDX_EFF") + F.lit(1.0)))
-        )
-
-        return agg
-
-# ============================================
-# VARIANT PRICE FEATURES (full class; may be unused in slim path)
-# ============================================
-class VariantPriceFeatures:
-    """
-    Derives listing-history + home-fact features from CombinedEventsBuilder output.
-
-    Returns:
-      - pm_sp: one row per (ZPID, YM)
-      - zm_sp: one row per (ZIPCODE, YM)
-    """
-    def __init__(self, combined_events: SnowparkDF, min_start_date: str = "2022-01-01"):
-        assert isinstance(combined_events, SnowparkDF)
-        self.sess = combined_events.session
-        self.events = combined_events
-        self.min_start_date = min_start_date
-
-        self.c_zpid_key  = "ZPID_KEY"
-        self.c_evt_date  = "EVT_DATE"
-        self.c_evt_ts    = "EVT_TS"
-        self.c_evt_type  = "EVT_TYPE"
-        self.c_evt_price = "EVT_PRICE"
-        self.c_is_rent   = "EVT_IS_RENTAL"
-
-        self.NUM_COLS_NUMERIC        = set(globals().get("NUM_COLS_NUMERIC", []))
-        self.NUM_COLS_TEXT_TO_NUM    = set(globals().get("NUM_COLS_TEXT_TO_NUMERIC", []))
-        self.BIN_COLS_NUMERIC_01     = set(globals().get("BIN_COLS_NUMERIC_01", []))
-        self.BIN_COLS_TEXT_YN        = set(globals().get("BIN_COLS_TEXT_YN", []))
-        self.CATEGORICAL_TEXT        = set(globals().get("CATEGORICAL_TEXT", []))
-
-        self.DROP_IN_VPF = (
-            set(globals().get("FREE_TEXT_EXCLUDE", []))
-            | set(globals().get("VARIANT_COLS", []))
-        )
-
-        self.KEEPERS = {
-            "ZPID","ZIPCODE","YM","EVT_DATE","EVT_TS","EVT_TYPE","EVT_PRICE",
-            "PREV_PRICE","PRICE_DOWN_FLG","PRICE_UP_FLG","CUT_AMT","RAISE_AMT",
-            "RN_IN_MONTH_ASC","RN_IN_MONTH_DESC"
-        }
-
-    @staticmethod
-    def _month_col(dt_col: F.Column) -> F.Column:
-        return F.to_date(F.date_trunc("month", dt_col))
-
-    def _events_clean(self) -> SnowparkDF:
-        base = self.events.filter(
-            F.coalesce(F.col(self.c_is_rent).cast(T.BooleanType()), F.lit(False)) == F.lit(False)
-        )
-
-        base_names = {"ZPID","ZIPCODE","EVT_DATE","EVT_TS","YM","EVT_TYPE","EVT_PRICE"}
-        present_cols = set(base.columns)
-        cand_all = (
-            self.NUM_COLS_NUMERIC
-            | self.NUM_COLS_TEXT_TO_NUM
-            | self.BIN_COLS_NUMERIC_01
-            | self.BIN_COLS_TEXT_YN
-            | self.CATEGORICAL_TEXT
-        )
-        skip = base_names | {"PRICEHISTORY","URL","STREETADDRESS","DESCRIPTION", self.c_is_rent}
-        pass_through = [c for c in cand_all if (c in present_cols and c not in skip)]
-
-        ev = (
-            base
-            .select(
-                F.col(self.c_zpid_key).cast(T.StringType()).alias("ZPID"),
-                F.col("ZIPCODE").cast(T.StringType()).alias("ZIPCODE"),
-                F.to_date(F.col(self.c_evt_date)).alias("EVT_DATE"),
-                F.coalesce(F.col(self.c_evt_ts), F.to_timestamp_ntz(F.col(self.c_evt_date))).alias("EVT_TS"),
-                self._month_col(F.to_date(F.col(self.c_evt_date))).alias("YM"),
-                F.col(self.c_evt_type).cast(T.StringType()).alias("EVT_TYPE"),
-                F.col(self.c_evt_price).cast(T.DoubleType()).alias("EVT_PRICE"),
-                *[F.col(c) for c in pass_through]
+        # Fallback: if somehow both are empty, at least use any event with price
+        if sold_df.empty and list_df.empty:
+            print("[ZipMonthIndexBuilder] WARNING: no sold/list rows with price – falling back to ANY event with price.")
+            any_price = ce_nr[has_price].copy()
+            base = any_price.groupby(keys, as_index=False).agg(
+                N_SOLD=("EVT_PRICE", "size"),
+                SOLD_MEDIAN=("EVT_PRICE", "median"),
+                N_LIST=("EVT_PRICE", "size"),
+                LIST_MEDIAN=("EVT_PRICE", "median"),
             )
-            .filter(F.col("EVT_DATE").is_not_null())
-            .filter(F.col("EVT_DATE") >= F.to_date(F.lit(self.min_start_date)))
-        )
+        else:
+            base = pd.merge(sold_df, list_df, on=keys, how="outer")
 
-        w_evt = Window.partition_by("ZPID").order_by(
-            F.col("EVT_DATE").asc_nulls_first(), F.col("EVT_TS").asc_nulls_first()
-        )
-        ev = (
-            ev
-            .with_column("PREV_PRICE", F.lag(F.col("EVT_PRICE")).over(w_evt))
-            .with_column(
-                "PRICE_DOWN_FLG",
-                F.iff((F.col("EVT_PRICE") < F.col("PREV_PRICE")) & F.col("PREV_PRICE").is_not_null(), F.lit(1), F.lit(0))
-            )
-            .with_column(
-                "PRICE_UP_FLG",
-                F.iff((F.col("EVT_PRICE") > F.col("PREV_PRICE")) & F.col("PREV_PRICE").is_not_null(), F.lit(1), F.lit(0))
-            )
-            .with_column("CUT_AMT",   F.iff(F.col("PRICE_DOWN_FLG")==1, F.col("PREV_PRICE") - F.col("EVT_PRICE"), F.lit(0.0)))
-            .with_column("RAISE_AMT", F.iff(F.col("PRICE_UP_FLG")==1,   F.col("EVT_PRICE") - F.col("PREV_PRICE"), F.lit(0.0)))
-        )
+        if base.empty:
+            print("[ZipMonthIndexBuilder] base is EMPTY after grouping – check EVT_PRICE parsing.")
+            return base  # early exit, nothing to do
 
-        w_m = Window.partition_by("ZPID", "YM").order_by(F.col("EVT_DATE").asc_nulls_first(), F.col("EVT_TS").asc_nulls_first())
-        w_m_desc = Window.partition_by("ZPID", "YM").order_by(F.col("EVT_DATE").desc_nulls_last(), F.col("EVT_TS").desc_nulls_last())
-        ev = (
-            ev
-            .with_column("RN_IN_MONTH_ASC",  F.row_number().over(w_m))
-            .with_column("RN_IN_MONTH_DESC", F.row_number().over(w_m_desc))
-        )
+        base["N_SOLD"] = base["N_SOLD"].fillna(0).astype(int)
+        base["N_LIST"] = base["N_LIST"].fillna(0).astype(int)
+        base["SOLD_MEDIAN"] = base["SOLD_MEDIAN"].astype(float)
+        base["LIST_MEDIAN"] = base["LIST_MEDIAN"].astype(float)
+        base["IDX_RAW"] = base["SOLD_MEDIAN"].fillna(base["LIST_MEDIAN"])
 
-        for c in [c for c in self.NUM_COLS_NUMERIC if c in ev.columns]:
-            ev = ev.with_column(c, F.col(c).cast(T.DoubleType()))
-        if "safe_to_double" in globals():
-            for c in [c for c in self.NUM_COLS_TEXT_TO_NUM if c in ev.columns]:
-                ev = ev.with_column(c, globals()["safe_to_double"](F.col(c)))
-        if "safe_to_binary_from_number" in globals():
-            for c in [c for c in self.BIN_COLS_NUMERIC_01 if c in ev.columns]:
-                ev = ev.with_column(c, globals()["safe_to_binary_from_number"](F.col(c)))
-        if "safe_to_binary_from_text" in globals():
-            for c in [c for c in self.BIN_COLS_TEXT_YN if c in ev.columns]:
-                ev = ev.with_column(c, globals()["safe_to_binary_from_text"](F.col(c)))
+        print(f"[ZipMonthIndexBuilder] base rows after grouping: {len(base):,}")
 
-        drop_cols = [c for c in self.DROP_IN_VPF if c in ev.columns and c not in self.KEEPERS]
-        if drop_cols:
-            ev = ev.drop(*drop_cols)
+        # --- months-to-date per ZIP ---
+        base = base.sort_values(["ZIPCODE", "YM"])
+        base["N_MONTHS_TO_DATE"] = base.groupby("ZIPCODE").cumcount() + 1
 
-        ev = ev.select(
-            "ZPID","ZIPCODE","YM","EVT_DATE","EVT_TS","EVT_TYPE","EVT_PRICE",
-            "PREV_PRICE","PRICE_DOWN_FLG","PRICE_UP_FLG","CUT_AMT","RAISE_AMT",
-            "RN_IN_MONTH_ASC","RN_IN_MONTH_DESC",
-            *[c for c in ev.columns if c not in {
-                "ZPID","ZIPCODE","YM","EVT_DATE","EVT_TS","EVT_TYPE","EVT_PRICE",
-                "PREV_PRICE","PRICE_DOWN_FLG","PRICE_UP_FLG","CUT_AMT","RAISE_AMT",
-                "RN_IN_MONTH_ASC","RN_IN_MONTH_DESC"
-            }]
-        )
-        return ev
-
-    def build_property_month(self) -> SnowparkDF:
-        ev = self._events_clean()
-
-        first_in_m = (
-            ev.filter(F.col("RN_IN_MONTH_ASC") == 1)
-              .select(
-                  F.col("ZPID").alias("F_ZPID"),
-                  F.col("YM").alias("F_YM"),
-                  F.col("ZIPCODE").alias("ZIP_FIRST_M"),
-                  F.col("EVT_DATE").alias("FIRST_SEEN_DATE_M"),
-                  F.col("EVT_PRICE").alias("LIST_PRICE_FIRST_M"),
-              )
-        )
-        last_in_m = (
-            ev.filter(F.col("RN_IN_MONTH_DESC") == 1)
-              .select(
-                  F.col("ZPID").alias("L_ZPID"),
-                  F.col("YM").alias("L_YM"),
-                  F.col("EVT_DATE").alias("LAST_SEEN_DATE_M"),
-                  F.col("EVT_PRICE").alias("LIST_PRICE_LAST_M"),
-              )
-        )
-
-        pm_agg = (
-            ev.group_by("ZPID","YM")
-              .agg(
-                  F.count(F.lit(1)).alias("N_EVENTS_M"),
-                  F.sum(F.col("PRICE_DOWN_FLG")).alias("N_PRICE_DROPS_M"),
-                  F.sum(F.col("PRICE_UP_FLG")).alias("N_PRICE_RAISES_M"),
-                  F.sum(F.col("CUT_AMT")).alias("PRICE_CUT_SUM_M"),
-                  F.sum(F.col("RAISE_AMT")).alias("PRICE_RAISE_SUM_M"),
-                  F.min(F.col("EVT_DATE")).alias("FIRST_SEEN_ANY_M"),
-                  F.max(F.col("EVT_DATE")).alias("LAST_SEEN_ANY_M"),
-                  F.lit(1).alias("PRESENT_IN_MONTH"),
-              )
-        )
-
-        pm = (
-            pm_agg
-            .join(first_in_m, (F.col("ZPID")==F.col("F_ZPID")) & (F.col("YM")==F.col("F_YM")), "left")
-            .join(last_in_m,  (F.col("ZPID")==F.col("L_ZPID")) & (F.col("YM")==F.col("L_YM")), "left")
-            .drop("F_ZPID","F_YM","L_ZPID","L_YM")
-            .with_column("ZIPCODE", F.col("ZIP_FIRST_M"))
-            .with_column(
-                "DAYS_SINCE_LIST_M",
-                F.iff(
-                    F.col("FIRST_SEEN_DATE_M").is_not_null(),
-                    F.call_function("DATEDIFF", F.lit("day"), F.col("FIRST_SEEN_DATE_M"), F.col("LAST_SEEN_ANY_M")),
-                    F.lit(None)
-                )
-            )
-            .drop("ZIP_FIRST_M")
-            .with_column("HAS_CUT_IN_M",   F.iff(F.col("N_PRICE_DROPS_M")  > 0, F.lit(1), F.lit(0)))
-            .with_column("HAS_RAISE_IN_M", F.iff(F.col("N_PRICE_RAISES_M") > 0, F.lit(1), F.lit(0)))
-        )
-
-        key_like = {
-            "ZPID","ZIPCODE","YM","EVT_DATE","EVT_TS","EVT_TYPE","EVT_PRICE",
-            "PREV_PRICE","PRICE_DOWN_FLG","PRICE_UP_FLG","CUT_AMT","RAISE_AMT",
-            "RN_IN_MONTH_ASC","RN_IN_MONTH_DESC",
-            "FIRST_SEEN_DATE_M","LAST_SEEN_DATE_M","FIRST_SEEN_ANY_M","LAST_SEEN_ANY_M",
-            "N_EVENTS_M","N_PRICE_DROPS_M","N_PRICE_RAISES_M","PRICE_CUT_SUM_M","PRICE_RAISE_SUM_M",
-            "PRESENT_IN_MONTH","DAYS_SINCE_LIST_M","LIST_PRICE_FIRST_M","LIST_PRICE_LAST_M"
-        }
-
-        num_bool_cols: List[str] = []
-        for f in ev.schema.fields:
-            c = f.name
-            if c in key_like:
-                continue
-            if isinstance(
-                f.datatype,
-                (T.IntegerType, T.LongType, T.FloatType, T.DoubleType, T.DecimalType, T.BooleanType),
-            ):
-                num_bool_cols.append(c)
-
-        if num_bool_cols:
-            med_aliases  = [f"{c}_MED"  for c in num_bool_cols]
-            mean_aliases = [f"{c}_MEAN" for c in num_bool_cols]
-
-        # reliability weights
+        # --- reliability weights ---
         n_tx = np.maximum(
             base["N_SOLD"].fillna(0).astype(float),
             base["N_LIST"].fillna(0).astype(float)
@@ -731,135 +503,89 @@ class VariantPriceFeatures:
         w_tx = np.maximum(w_tx, 0.2)
         base["W_H1_COMBINED"] = np.minimum(w_hist * w_tx, 1.0)
 
-            pm_more = (
-                ev.group_by("ZPID","YM").agg(*agg_exprs)
-                  .select(
-                      F.col("ZPID").alias("J_ZPID"),
-                      F.col("YM").alias("J_YM"),
-                      *[F.col(a) for a in (med_aliases + mean_aliases)]
-                  )
-            )
-
-            pm = (
-                pm.join(
-                    pm_more,
-                    (F.col("ZPID")==F.col("J_ZPID")) & (F.col("YM")==F.col("J_YM")),
-                    "left"
-                )
-                .drop("J_ZPID","J_YM")
-            )
+        # --- macro medians (mortgage, unemployment) at ZIP×YM ---
+        macro_cols = [c for c in ["WEEKLY_AVERAGE_MORTGAGE_RATE", "UNEMPLOYMENT_RATE"] if c in ce_nr.columns]
+        if macro_cols:
+            macro = ce_nr[has_price].groupby(keys, as_index=False)[macro_cols].median()
             base = base.merge(macro, on=keys, how="left")
 
-        pm = pm.select(
-            "ZPID","YM","ZIPCODE",
-            *[c for c in pm.columns if c not in {"ZPID","YM","ZIPCODE"}]
-        )
+        # --- county/state pooling ---
+        county_base = base.groupby(["COUNTY_MODE", "YM"], as_index=False)["IDX_RAW"].median()
+        county_base = county_base.rename(columns={"IDX_RAW": "IDX_COUNTY_MED"})
 
-        return pm
+        state_base = base.groupby(["STATE_MODE", "YM"], as_index=False)["IDX_RAW"].median()
+        state_base = state_base.rename(columns={"IDX_RAW": "IDX_STATE_MED"})
 
-    def build_zip_month(self, pm_sp: SnowparkDF) -> SnowparkDF:
-        assert isinstance(pm_sp, SnowparkDF)
-        pm_sp = pm_sp.filter(F.col("ZIPCODE").is_not_null())
+        agg = base.merge(county_base, on=["COUNTY_MODE", "YM"], how="left")
+        agg = agg.merge(state_base, on=["STATE_MODE", "YM"], how="left")
 
-        schema = pm_sp.schema
-        from snowflake.snowpark.types import IntegerType, LongType, FloatType, DoubleType, DecimalType, BooleanType
+        # --- effective IDX ---
+        agg["IDX_EFF"] = agg["IDX_RAW"]
+        mask_na = agg["IDX_EFF"].isna()
+        agg.loc[mask_na, "IDX_EFF"] = agg.loc[mask_na, "IDX_COUNTY_MED"]
+        mask_na = agg["IDX_EFF"].isna()
+        agg.loc[mask_na, "IDX_EFF"] = agg.loc[mask_na, "IDX_STATE_MED"]
 
-        def is_num(dt): return isinstance(dt, (IntegerType, LongType, FloatType, DoubleType, DecimalType))
-        def is_bool(dt): return isinstance(dt, BooleanType)
+        # --- relatives ---
+        agg["IDX_REL_COUNTY"] = agg["IDX_EFF"] / agg["IDX_COUNTY_MED"].replace(0, np.nan)
+        agg["IDX_REL_STATE"]  = agg["IDX_EFF"] / agg["IDX_STATE_MED"].replace(0, np.nan)
 
-        ignore = {"ZPID","ZIPCODE","YM","FIRST_SEEN_DATE_M","LAST_SEEN_DATE_M","FIRST_SEEN_ANY_M","LAST_SEEN_ANY_M"}
-        agg_exprs = []
+        # ensure IDX exists
+        agg["IDX"] = agg["IDX_EFF"]
 
-        for f in schema.fields:
-            c = f.name
-            if c in ignore:
-                continue
-            dt = f.datatype
-            if is_bool(dt):
-                agg_exprs.append(F.avg(F.col(c).cast("double")).alias(f"PM_{c}_SHARE"))
-            elif is_num(dt):
-                agg_exprs.append(F.avg(F.col(c)).alias(f"PM_{c}_MEAN"))
-                agg_exprs.append(F.median(F.col(c)).alias(f"PM_{c}_MED"))
+        # --- lead labels per ZIP ---
+        agg = agg.sort_values(["ZIPCODE", "YM"])
+        grp = agg.groupby("ZIPCODE", group_keys=False)
+        agg["IDX_FUTURE_H1"] = grp["IDX"].shift(-1)
+        agg["IDX_FUTURE_H2"] = grp["IDX"].shift(-2)
 
-        if "HAS_CUT_IN_M" in pm_sp.columns:
-            agg_exprs.append(F.sum(F.col("HAS_CUT_IN_M")).alias("N_LIST_WITH_CUT_PM"))
-        if "HAS_RAISE_IN_M" in pm_sp.columns:
-            agg_exprs.append(F.sum(F.col("HAS_RAISE_IN_M")).alias("N_LIST_WITH_RAISE_PM"))
+        for col_src, col_y in [("IDX_FUTURE_H1", "Y_H1"), ("IDX_FUTURE_H2", "Y_H2")]:
+            agg[col_y] = np.log1p(agg[col_src]) - np.log1p(agg["IDX"])
 
-        agg_exprs.append(F.count_distinct(F.col("ZPID")).alias("N_LISTINGS_PM"))
-        zm = pm_sp.group_by("ZIPCODE","YM").agg(*agg_exprs)
-
-        if {"N_LISTINGS_PM","N_LIST_WITH_CUT_PM"}.issubset(set(zm.columns)):
-            zm = zm.with_column(
-                "RATIO_WITH_CUT_PM",
-                F.iff(F.col("N_LISTINGS_PM") > 0, F.col("N_LIST_WITH_CUT_PM")/F.col("N_LISTINGS_PM"), F.lit(None))
-            )
-        if {"N_LISTINGS_PM","N_LIST_WITH_RAISE_PM"}.issubset(set(zm.columns)):
-            zm = zm.with_column(
-                "RATIO_WITH_RAISE_PM",
-                F.iff(F.col("N_LISTINGS_PM") > 0, F.col("N_LIST_WITH_RAISE_PM")/F.col("N_LISTINGS_PM"), F.lit(None))
-            )
-
-        return zm
+        print(f"[ZipMonthIndexBuilder] final agg rows: {len(agg):,}")
+        return agg.reset_index(drop=True)
 
 # ============================================
-# GEO TILING FEATURES
+# GEO TILING FEATURES (LOCAL APPROX - NO H3 LIB)
 # ============================================
-class GeoTilingFeatures:
+def build_geo_tiling(combined_events: pd.DataFrame,
+                     resolutions=(6, 7, 8, 9),
+                     prefix: str = "H3_R") -> Optional[pd.DataFrame]:
     """
-    Add H3/S2 tiling columns to a pre-aggregated ZIP×YM frame.
+    Approximate H3-style tiling:
+      - 1 row per ZIPCODE×YM
+      - median LAT/LON
+      - mode STATE/COUNTY
+      - 'H3_R{r}' ≈ f"H3R{r}{lat_3dp}_{lon_3dp}"
     """
+    required = ["ZIPCODE", "LATITUDE", "LONGITUDE"]
+    if not all(c in combined_events.columns for c in required):
+        return None
 
-    def __init__(
-        self,
-        df: SnowparkDF,
-        udf_name: str | None = None,
-        resolutions=(6, 7, 8, 9),
-        prefix: str = "H3_R",
-        udf_signature: str = "latlon",
-    ):
-        assert isinstance(df, SnowparkDF)
-        self.df = df
-        self.udf_name = udf_name
-        self.resolutions = list(resolutions)
-        self.prefix = prefix
-        self.udf_signature = udf_signature
+    df = combined_events.copy()
 
-        needed = ["ZIPCODE", "YM", "LATITUDE", "LONGITUDE", "STATE_MODE", "COUNTY_MODE"]
-        missing = [c for c in needed if c not in df.columns]
-        if missing:
-            raise ValueError(f"GeoTilingFeatures: missing required columns: {missing}")
+    # Build YM from EVT_DATE or existing YM
+    if "EVT_DATE" in df.columns:
+        df["EVT_DATE"] = pd.to_datetime(df["EVT_DATE"], errors="coerce")
+        df["YM"] = df["EVT_DATE"].values.astype("datetime64[M]")
+    elif "YM" in df.columns:
+        df["YM"] = pd.to_datetime(df["YM"], errors="coerce").values.astype("datetime64[M]")
+    else:
+        return None
 
-        self.df = (
-            self.df
-            .with_column("ZIPCODE",     F.col("ZIPCODE").cast(T.StringType()))
-            .with_column("YM",          F.to_date(F.col("YM")))
-            .with_column("LATITUDE",    F.col("LATITUDE").cast(T.DoubleType()))
-            .with_column("LONGITUDE",   F.col("LONGITUDE").cast(T.DoubleType()))
-            .with_column("STATE_MODE",  F.col("STATE_MODE").cast(T.StringType()))
-            .with_column("COUNTY_MODE", F.col("COUNTY_MODE").cast(T.StringType()))
-        )
+    df["ZIPCODE"] = df["ZIPCODE"].astype(str)
+    df["LATITUDE"] = pd.to_numeric(df["LATITUDE"], errors="coerce")
+    df["LONGITUDE"] = pd.to_numeric(df["LONGITUDE"], errors="coerce")
 
-    def _tile_expr(self, r: int):
-        lat = F.col("LATITUDE")
-        lon = F.col("LONGITUDE")
+    subset = df[["ZIPCODE", "YM", "LATITUDE", "LONGITUDE", "STATE", "COUNTY"]].dropna(
+        subset=["ZIPCODE", "YM"]
+    )
+    if subset.empty:
+        return None
 
-        if self.udf_name:
-            if self.udf_signature == "lonlat":
-                expr = F.call_function(self.udf_name, lon, lat, F.lit(r))
-            else:
-                expr = F.call_function(self.udf_name, lat, lon, F.lit(r))
-            return expr.cast(T.StringType())
-
-        return F.concat(
-            F.lit(f"H3R{r}"),
-            F.to_varchar(F.round(lat, 3)),
-            F.to_varchar(F.round(lon, 3)),
-        ).cast(T.StringType())
-
-    def build(self) -> SnowparkDF:
-        df = self.df
-        added_cols = []
+    def mode_or_first(x):
+        m = x.mode()
+        return m.iloc[0] if not m.empty else x.iloc[0]
 
     agg = subset.groupby(["ZIPCODE", "YM"], as_index=False).agg(
         LATITUDE=("LATITUDE", "median"),
@@ -881,253 +607,7 @@ class GeoTilingFeatures:
     return agg[cols]
 
 # ============================================
-# SLIM VARIANT FEATURES (PM / ZM) FROM combined_events
-# ============================================
-assert 'CombinedEventsBuilder' in globals()
-
-builder = CombinedEventsBuilder(
-    raw_table=RAW_TABLE,
-    zpid_col="ZPID",
-    pricehistory_col="PRICEHISTORY",
-    scrape_ts_col="SCRAPEDAT"
-)
-
-combined_events = builder.build()
-
-from snowflake.snowpark import functions as F, types as T
-from snowflake.snowpark.window import Window
-from snowflake.snowpark import DataFrame as SnowparkDF
-
-assert isinstance(combined_events, SnowparkDF)
-
-START_DATE = "2022-01-01"
-PM_TMP = "__TMP_PM_SLIM"
-ZM_TMP = "__TMP_ZM_SLIM"
-
-sess = combined_events.session
-
-def as_double_safe(cname: str):
-    return safe_to_double(F.col(cname))
-
-KEEP_ATTRS = [
-    "PRICE", "EVT_PRICE_PSF",
-    "SQFT", "LOTSQFT", "LOT",
-    "BEDROOMS", "BATHROOMS", "FULLBATHROOMS", "HALFBATHROOMS",
-    "YEARBUILT", "PROPERTY_AGE",
-    "CENTRALHEATING", "FORCEDAIRHEATING", "ELECTRICHEATING", "NATURALGASHEATING",
-    "CENTRALCOOLING", "WINDOWUNITACCOOLING",
-    "GARAGEPARKING", "ATTACHEDPARKING", "DETACHEDPARKING", "DRIVEWAY", "OFFSTREETPARKING",
-    "INGROUNDPOOL", "INDOORPOOL", "HEATEDPOOL",
-    "UNEMPLOYMENT_RATE", "MEDIAN_LISTING_PRICE", "MEDIAN_DAYS_ON_MARKET",
-    "ACTIVE_LISTING_COUNT", "WEEKLY_AVERAGE_MORTGAGE_RATE", "FM_HPI",
-]
-
-present = set(combined_events.columns)
-
-ce = combined_events.filter(
-    F.coalesce(F.col("EVT_IS_RENTAL").cast(T.BooleanType()), F.lit(False)) == F.lit(False)
-)
-
-base_cols = ["ZPID_KEY","ZPID","ZIPCODE","EVT_DATE","EVT_TS","EVT_TYPE","EVT_PRICE"]
-base_cols += [c for c in KEEP_ATTRS if c in present]
-base_cols = list(dict.fromkeys([c for c in base_cols if c in present]))
-base = ce.select(*[F.col(c) for c in base_cols])
-
-evt_str = F.col("EVT_DATE").cast(T.StringType())
-evt_num = F.call_function("TRY_TO_NUMBER", evt_str)
-
-evt_day_from_date = F.call_function("TRY_TO_DATE", evt_str)
-evt_day_from_ts   = F.call_function("TO_DATE", F.call_function("TRY_TO_TIMESTAMP_NTZ", evt_str))
-evt_day_from_ms   = F.call_function(
-    "TO_DATE",
-    F.call_function(
-        "TO_TIMESTAMP_NTZ",
-        F.when(evt_num.is_not_null() & (evt_num > F.lit(1_000_000_000_000)),
-               evt_num / F.lit(1000)).otherwise(F.lit(None))
-    )
-)
-evt_day_from_sec  = F.call_function("TO_DATE", F.call_function("TO_TIMESTAMP_NTZ", evt_num))
-
-EVT_DAY_CANON = (
-    F.when(evt_day_from_date.is_not_null(), evt_day_from_date)
-     .when(evt_day_from_ts.is_not_null(),   evt_day_from_ts)
-     .when(evt_num.is_not_null() & (evt_num > F.lit(1_000_000_000_000)), evt_day_from_ms)
-     .when(evt_num.is_not_null() & (evt_num >= F.lit(1_000_000_000)) & (evt_num <= F.lit(1_000_000_000_000)), evt_day_from_sec)
-     .otherwise(F.lit(None))
-)
-
-ev = (
-    base
-    .with_column("EVT_DAY_CANON", EVT_DAY_CANON)
-    .with_column("YM", F.to_date(F.date_trunc("month", F.col("EVT_DAY_CANON"))))
-    .with_column("EVT_PRICE_NUM", safe_to_double(F.col("EVT_PRICE")))
-    .drop("EVT_PRICE")
-)
-
-ev = ev.filter(
-    F.col("ZIPCODE").is_not_null()
-    & F.col("EVT_DAY_CANON").is_not_null()
-    & (F.col("EVT_DAY_CANON") >= F.to_date(F.lit(START_DATE)))
-)
-
-print("Slim VARIANT base (events) — filtering & type cleanup…")
-try:
-    ev.limit(3).show()
-except Exception:
-    pass
-
-w_evt = Window.partition_by("ZPID").order_by(F.col("EVT_DAY_CANON").asc_nulls_first(), F.col("EVT_TS").asc_nulls_first())
-ev = (
-    ev
-    .with_column("PREV_PRICE", F.lag(F.col("EVT_PRICE_NUM")).over(w_evt))
-    .with_column("PRICE_DOWN_FLG", F.iff((F.col("EVT_PRICE_NUM") < F.col("PREV_PRICE")) & F.col("PREV_PRICE").is_not_null(), F.lit(1), F.lit(0)))
-    .with_column("PRICE_UP_FLG",   F.iff((F.col("EVT_PRICE_NUM") > F.col("PREV_PRICE")) & F.col("PREV_PRICE").is_not_null(), F.lit(1), F.lit(0)))
-    .with_column("CUT_AMT",        F.iff(F.col("PRICE_DOWN_FLG")==1, F.col("PREV_PRICE") - F.col("EVT_PRICE_NUM"), F.lit(0.0)))
-    .with_column("RAISE_AMT",      F.iff(F.col("PRICE_UP_FLG")==1,   F.col("EVT_PRICE_NUM") - F.col("PREV_PRICE"), F.lit(0.0)))
-)
-
-w_m_asc  = Window.partition_by("ZPID","YM").order_by(F.col("EVT_DAY_CANON").asc_nulls_first(), F.col("EVT_TS").asc_nulls_first())
-w_m_desc = Window.partition_by("ZPID","YM").order_by(F.col("EVT_DAY_CANON").desc_nulls_last(), F.col("EVT_TS").desc_nulls_last())
-ev = (
-    ev
-    .with_column("RN_IN_MONTH_ASC",  F.row_number().over(w_m_asc))
-    .with_column("RN_IN_MONTH_DESC", F.row_number().over(w_m_desc))
-)
-
-first_in_m = (
-    ev.filter(F.col("RN_IN_MONTH_ASC")==1)
-      .select(
-          F.col("ZPID").alias("F_ZPID"),
-          F.col("YM").alias("F_YM"),
-          F.col("ZIPCODE").alias("ZIP_FIRST_M"),
-          F.col("EVT_DAY_CANON").alias("FIRST_SEEN_DATE_M"),
-          F.col("EVT_PRICE_NUM").alias("LIST_PRICE_FIRST_M"),
-      )
-)
-
-last_in_m = (
-    ev.filter(F.col("RN_IN_MONTH_DESC")==1)
-      .select(
-          F.col("ZPID").alias("L_ZPID"),
-          F.col("YM").alias("L_YM"),
-          F.col("EVT_DAY_CANON").alias("LAST_SEEN_DATE_M"),
-          F.col("EVT_PRICE_NUM").alias("LIST_PRICE_LAST_M"),
-      )
-)
-
-pm_agg = (
-    ev.group_by("ZPID","YM")
-      .agg(
-          F.count(F.lit(1)).alias("N_EVENTS_M"),
-          F.sum(F.col("PRICE_DOWN_FLG")).alias("N_PRICE_DROPS_M"),
-          F.sum(F.col("PRICE_UP_FLG")).alias("N_PRICE_RAISES_M"),
-          F.sum(F.col("CUT_AMT")).alias("PRICE_CUT_SUM_M"),
-          F.sum(F.col("RAISE_AMT")).alias("PRICE_RAISE_SUM_M"),
-          F.min(F.col("EVT_DAY_CANON")).alias("FIRST_SEEN_ANY_M"),
-          F.max(F.col("EVT_DAY_CANON")).alias("LAST_SEEN_ANY_M"),
-          F.median(F.col("EVT_PRICE_NUM")).alias("MED_LIST_PRICE_M"),
-      )
-)
-
-pm = (
-    pm_agg
-    .join(first_in_m, (F.col("ZPID")==F.col("F_ZPID")) & (F.col("YM")==F.col("F_YM")), "left")
-    .join(last_in_m,  (F.col("ZPID")==F.col("L_ZPID")) & (F.col("YM")==F.col("L_YM")), "left")
-    .drop("F_ZPID","F_YM","L_ZPID","L_YM")
-    .with_column("ZIPCODE", F.col("ZIP_FIRST_M"))
-    .with_column(
-        "DAYS_SINCE_LIST_M",
-        F.iff(
-            F.col("FIRST_SEEN_DATE_M").is_not_null(),
-            F.call_function("DATEDIFF", F.lit("day"), F.col("FIRST_SEEN_DATE_M"), F.col("LAST_SEEN_ANY_M")),
-            F.lit(None)
-        )
-    )
-    .drop("ZIP_FIRST_M")
-    .with_column("HAS_CUT_IN_M",   F.iff(F.col("N_PRICE_DROPS_M")  > 0, F.lit(1), F.lit(0)))
-    .with_column("HAS_RAISE_IN_M", F.iff(F.col("N_PRICE_RAISES_M") > 0, F.lit(1), F.lit(0)))
-)
-
-num_like, bin_like = [], []
-ev_schema = {f.name: f.datatype for f in ev.schema.fields}
-for c in KEEP_ATTRS:
-    if c not in ev_schema:
-        continue
-    dt = ev_schema[c]
-    if isinstance(dt, T.BooleanType):
-        bin_like.append(c)
-    elif ("POOL" in c) or ("PARKING" in c) or ("HEATING" in c) or ("COOLING" in c):
-        bin_like.append(c)
-    else:
-        num_like.append(c)
-
-agg_exprs = []
-for c in num_like:
-    if c in ev.columns:
-        agg_exprs += [
-            F.median(as_double_safe(c)).alias(f"{c}_MED_PM"),
-            F.avg(as_double_safe(c)).alias(f"{c}_MEAN_PM"),
-        ]
-for c in bin_like:
-    if c in ev.columns:
-        agg_exprs += [
-            F.avg(as_double_safe(c)).alias(f"{c}_SHARE_PM"),
-        ]
-
-if agg_exprs:
-    pm_more = ev.group_by("ZPID","YM").agg(*agg_exprs)
-    pm = pm.join(pm_more, ["ZPID","YM"], "left")
-
-pm.create_or_replace_temp_view(PM_TMP)
-
-print(f"[pm_slim] TEMP view {PM_TMP} created.")
-print("Rows:")
-sess.table(PM_TMP).select(F.count(F.lit(1)).alias("N")).show()
-print("Columns:", len(sess.table(PM_TMP).columns))
-
-pm_tv = sess.table(PM_TMP)
-
-agg_zm = [
-    F.count_distinct(F.col("ZPID")).alias("N_PROP_PM"),
-    F.sum(F.col("HAS_CUT_IN_M")).alias("N_PROP_WITH_CUT_PM"),
-    F.sum(F.col("HAS_RAISE_IN_M")).alias("N_PROP_WITH_RAISE_PM"),
-]
-
-for c in ["N_EVENTS_M","N_PRICE_DROPS_M","N_PRICE_RAISES_M","PRICE_CUT_SUM_M","PRICE_RAISE_SUM_M",
-          "DAYS_SINCE_LIST_M","MED_LIST_PRICE_M","LIST_PRICE_FIRST_M","LIST_PRICE_LAST_M"]:
-    if c in pm_tv.columns:
-        agg_zm += [
-            F.avg(F.col(c)).alias(f"PM_{c}_MEAN"),
-            F.median(F.col(c)).alias(f"PM_{c}_MED"),
-        ]
-
-for c in pm_tv.columns:
-    if c.endswith("_MEAN_PM") or c.endswith("_MED_PM") or c.endswith("_SHARE_PM"):
-        agg_zm.append(F.avg(F.col(c)).alias(f"PM_{c.replace('_PM','')}_ZIPMEAN"))
-
-zm = (
-    pm_tv.group_by("ZIPCODE","YM")
-         .agg(*agg_zm)
-         .with_column("SHARE_PROP_WITH_CUT_PM",
-                      F.iff(F.col("N_PROP_PM")>0, F.col("N_PROP_WITH_CUT_PM")/F.col("N_PROP_PM"), F.lit(None)))
-         .with_column("SHARE_PROP_WITH_RAISE_PM",
-                      F.iff(F.col("N_PROP_PM")>0, F.col("N_PROP_WITH_RAISE_PM")/F.col("N_PROP_PM"), F.lit(None)))
-)
-
-zm.create_or_replace_temp_view(ZM_TMP)
-
-print(f"[zm_slim] TEMP view {ZM_TMP} created.")
-print("Rows:")
-sess.table(ZM_TMP).select(F.count(F.lit(1)).alias("N")).show()
-print("Columns:", len(sess.table(ZM_TMP).columns))
-
-try:
-    sess.table(ZM_TMP).sort(F.col("YM").asc()).limit(5).show()
-except Exception:
-    pass
-
-# ============================================
-# ZIP INDEX FEATUREIZER + BUILD_ALL_FEATURES
+# ZIP INDEX FEATUREIZER (LOCAL / PANDAS)
 # ============================================
 class ZipIndexFeatureizer:
     def __init__(self, idx_df: pd.DataFrame,
@@ -1201,43 +681,12 @@ class ZipIndexFeatureizer:
         df = self._add_macro_lags(df)
         return df
 
-    def build(self) -> SnowparkDF:
-        feat = self.idx_df
-        if isinstance(self.zm, SnowparkDF):
-            feat = feat.join(self.zm, on=["ZIPCODE","YM"], how="left")
-        if isinstance(self.geo, SnowparkDF):
-            geo_cols = [c for c in self.geo.columns if c.upper().startswith("H3_R")]
-            if geo_cols:
-                feat = feat.join(self.geo.select("ZIPCODE","YM", *geo_cols), on=["ZIPCODE","YM"], how="left")
-        feat = self._add_temporal(feat)
-        feat = self._add_idx_lags_mom(feat)
-        feat = self._add_macro_lags(feat)
-        return feat
-
-def _is_df(x):
-    try:
-        return isinstance(x, SnowparkDF)
-    except Exception:
-        return False
-
-def _unpack_idx_builder(out) -> Tuple[SnowparkDF, Optional[SnowparkDF], Optional[SnowparkDF], Optional[SnowparkDF]]:
-    if _is_df(out):
-        return out, None, None, None
-    if isinstance(out, (list, tuple)):
-        dfs = [x for x in out if _is_df(x)]
-        if not dfs:
-            raise ValueError("ZipMonthIndexBuilder.build() returned no DataFrames.")
-        idx_sp = dfs[0]
-        ht_share_sp = next((d for d in dfs[1:] if any("HT_SHARE" in c for c in d.columns)), None)
-        num_agg_sp  = dfs[2] if len(dfs) >= 4 else None
-        bin_agg_sp  = dfs[3] if len(dfs) >= 4 else None
-        return idx_sp, ht_share_sp, num_agg_sp, bin_agg_sp
-    raise ValueError(f"Unsupported ZipMonthIndexBuilder.build() output type: {type(out)}")
-
+# ============================================
+# BUILD_ALL_FEATURES (LOCAL PIPELINE)
+# ============================================
 def build_all_features(
-    combined_events: SnowparkDF,
-    h3_udf: str | None = None,
-    h3_resolutions=(6,7,8,9),
+    combined_events: pd.DataFrame,
+    h3_resolutions=(6, 7, 8, 9),
     min_start_date="2022-01-01",
     min_sold_per_zip_m=10,
     min_list_per_zip_m=20,
@@ -1249,86 +698,10 @@ def build_all_features(
         min_sold_per_zip_m=min_sold_per_zip_m,
         min_list_per_zip_m=min_list_per_zip_m,
     )
-    idx_out = idx_builder.build()
-    idx_sp, ht_share_sp, num_agg_sp, bin_agg_sp = _unpack_idx_builder(idx_out)
+    idx_df = idx_builder.build()
 
-    cols = set(idx_sp.columns)
-    have_idx      = "IDX"      in cols
-    have_idx_eff  = "IDX_EFF"  in cols
-    have_idx_raw  = "IDX_RAW"  in cols
-
-    if not have_idx:
-        co = F.coalesce(
-            F.col("IDX_EFF") if have_idx_eff else F.lit(None),
-            F.col("IDX_RAW") if have_idx_raw else F.lit(None),
-        )
-        idx_sp = idx_sp.with_column("IDX", co)
-        print("[normalize] Added IDX from coalesce(IDX_EFF, IDX_RAW).")
-
-    pm_sp = None
-    zm_sp = None
-    try:
-        zm_sp = sess.table("__TMP_ZM_SLIM")
-        print("Using precomputed slim VARIANT ZIP×month from __TMP_ZM_SLIM.")
-    except Exception as e:
-        print("Slim VARIANT view __TMP_ZM_SLIM not found — continuing without VARIANT ZM. Details:", repr(e))
-
-    geo_sp = None
-    evt_date_col = "EVT_DATE" if "EVT_DATE" in combined_events.columns else ("evt_date" if "evt_date" in combined_events.columns else None)
-    latlon_ok = all(c in combined_events.columns for c in ["ZIPCODE","LATITUDE","LONGITUDE","STATE","COUNTY"]) and evt_date_col is not None
-
-    if latlon_ok:
-        print("Computing geo-tiling features (H3/S2)…")
-        base_latlon = (
-            combined_events
-            .select(
-                F.col("ZIPCODE").cast(T.StringType()).alias("ZIPCODE"),
-                F.to_date(F.col(evt_date_col)).alias("EVT_DATE"),
-                F.to_date(F.date_trunc("month", F.col(evt_date_col))).alias("YM"),
-                F.col("LATITUDE").cast(T.DoubleType()).alias("LATITUDE"),
-                F.col("LONGITUDE").cast(T.DoubleType()).alias("LONGITUDE"),
-                F.col("STATE").cast(T.StringType()).alias("STATE"),
-                F.col("COUNTY").cast(T.StringType()).alias("COUNTY"),
-            )
-            .filter(F.col("ZIPCODE").is_not_null() & F.col("YM").is_not_null())
-        )
-
-        latlon_agg = (
-            base_latlon
-            .group_by("ZIPCODE","YM")
-            .agg(
-                F.median(F.col("LATITUDE")).alias("LATITUDE"),
-                F.median(F.col("LONGITUDE")).alias("LONGITUDE"),
-                F.max(F.col("STATE")).alias("STATE_MODE"),
-                F.max(F.col("COUNTY")).alias("COUNTY_MODE"),
-            )
-        )
-
-        try:
-            latlon = latlon_agg.select(
-                F.col("ZIPCODE"), F.col("YM"),
-                F.col("LATITUDE"), F.col("LONGITUDE"),
-                F.col("STATE_MODE"), F.col("COUNTY_MODE")
-            )
-        except Exception as e:
-            print(f"Planner balked on pure SELECT lat/lon aggregation; using TEMP VIEW fallback. Details: {e}")
-            latlon_view = "__TMP_LATLON_ZIPYM"
-            latlon_agg.create_or_replace_temp_view(latlon_view)
-            latlon = sess.table(latlon_view).select(
-                F.col("ZIPCODE"), F.col("YM"),
-                F.col("LATITUDE"), F.col("LONGITUDE"),
-                F.col("STATE_MODE"), F.col("COUNTY_MODE")
-            )
-
-        geo_sp = GeoTilingFeatures(
-            latlon,
-            udf_name=h3_udf,
-            resolutions=h3_resolutions,
-            prefix="H3_R",
-            udf_signature="latlon",
-        ).build()
-    else:
-        print("LAT/LON/EVT_DATE not present — skipping geo-tiling.")
+    print("Computing geo-tiling features (approx)…")
+    geo_df = build_geo_tiling(combined_events, resolutions=h3_resolutions)
 
     print("Assembling feature matrix (ZipIndexFeatureizer)…")
     feat_df = idx_df.copy()
@@ -1349,11 +722,18 @@ def build_all_features(
             feat_df[c] = pd.to_datetime(feat_df[c], errors="coerce")
 
     must_haves = ["YM", "IDX", "Y_H1", "Y_H2"]
-    missing = [c for c in must_haves if c not in feat_sp.columns]
+    missing = [c for c in must_haves if c not in feat_df.columns]
     if missing:
-        print("WARNING — Expected columns missing on feat_sp:", missing)
+        print("WARNING — Expected columns missing on feat_df:", missing)
 
-    return feat_sp
+    return feat_df
+
+# ============================================
+# LOAD RAW CSV, BUILD COMBINED_EVENTS & FEATURES
+# ============================================
+print(f"Loading raw data from {RAW_CSV_PATH} …")
+raw_df = pd.read_csv(RAW_CSV_PATH, low_memory=False)
+raw_df = downcast_df(raw_df)
 
 # Build combined events
 print("Building combined_events from PRICEHISTORY…")
@@ -1368,31 +748,26 @@ print("combined_events shape:", combined_events.shape)
 
 # Build feature matrix
 print("Orchestrating full feature build…")
-feat_sp = build_all_features(
+feat_df = build_all_features(
     combined_events=combined_events,
     h3_resolutions=(6, 7, 8, 9),
     min_start_date=MIN_START_DATE,
     min_sold_per_zip_m=MIN_SOLD_PER_ZIP_M,
     min_list_per_zip_m=MIN_LIST_PER_ZIP_M,
 )
-print("feat_sp ready. Columns:", len(feat_sp.columns))
+print("feat_df ready. Columns:", len(feat_df.columns), " | rows:", len(feat_df))
 
 # ============================================
-# TRAINING CONFIG & MODEL DEFINITIONS
+# TRAINING CONFIG & MODEL DEFINITIONS (UNCHANGED LOGIC)
 # ============================================
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import r2_score, mean_absolute_error
-from sklearn.preprocessing import StandardScaler
-from dateutil.relativedelta import relativedelta
-
 torch.set_num_threads(max(1, os.cpu_count() // 2))
 
 SEED = 42
 random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
 
 RUN_DIR = Path("runlog"); RUN_DIR.mkdir(exist_ok=True)
+FIG_DIR = Path("figs"); FIG_DIR.mkdir(exist_ok=True)
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("Device:", DEVICE)
 
@@ -1427,8 +802,8 @@ FUTUREISH_COLS = {"BASE_DLOG_H1","BASE_DLOG_H2","_BASE_FWD1","_BASE_FWD2","_BASE
 
 class TabularDataset(Dataset):
     def __init__(self, df: pd.DataFrame, rows_mask: pd.Series,
-                 num_cols: List[str], cat_cols: List[str], cat_maps: Dict[str,Dict[Any,int]],
-                 targets: List[str], weights_col: str | None = None):
+                 num_cols: List[str], cat_cols: List[str], cat_maps: Dict[str, Dict[Any, int]],
+                 targets: List[str], weights_col: Optional[str] = None):
         ix = np.where(rows_mask.values)[0]
         self.df = df.iloc[ix].copy().reset_index(drop=True)
 
@@ -1436,9 +811,13 @@ class TabularDataset(Dataset):
 
         idx_col = "IDX_EFF" if "IDX_EFF" in self.df.columns else "IDX"
 
-        good = pd.to_numeric(self.df[idx_col], errors="coerce").astype(float).replace([np.inf, -np.inf], np.nan).notna().values
+        good = pd.to_numeric(self.df[idx_col], errors="coerce").astype(float).replace(
+            [np.inf, -np.inf], np.nan
+        ).notna().values
         for yc in ycols:
-            yv = pd.to_numeric(self.df[yc], errors="coerce").astype(float).replace([np.inf, -np.inf], np.nan).notna().values
+            yv = pd.to_numeric(self.df[yc], errors="coerce").astype(float).replace(
+                [np.inf, -np.inf], np.nan
+            ).notna().values
             good &= yv
         self.df = self.df.loc[good].reset_index(drop=True)
 
@@ -1456,14 +835,23 @@ class TabularDataset(Dataset):
                 .fillna(0.0)
             )
 
-        self.X_num = torch.tensor(self.df[num_cols].astype(np.float32).values, dtype=torch.float32) if num_cols else None
+        self.X_num = torch.tensor(
+            self.df[num_cols].astype(np.float32).values,
+            dtype=torch.float32
+        ) if num_cols else None
 
         self.X_cat = []
         for c in cat_cols:
             mp = cat_maps[c]
-            idx = self.df[c].astype("string").map(mp).fillna(0).astype(np.int64).values
+            idx = (
+                self.df[c].astype("string")
+                .map(mp)
+                .fillna(0)
+                .astype(np.int64)
+                .values
+            )
             self.X_cat.append(torch.tensor(idx, dtype=torch.long))
-        self.X_cat = torch.stack(self.X_cat, dim=1) if len(self.X_cat)>0 else None
+        self.X_cat = torch.stack(self.X_cat, dim=1) if len(self.X_cat) > 0 else None
 
         ys = []
         for yc in ycols:
@@ -1471,15 +859,23 @@ class TabularDataset(Dataset):
             ys.append(torch.tensor(yv, dtype=torch.float32))
         self.y = torch.stack(ys, dim=1)
 
-        self.idx_now = torch.tensor(pd.to_numeric(self.df[self.idx_col], errors="coerce").astype(np.float32).values, dtype=torch.float32)
+        self.idx_now = torch.tensor(
+            pd.to_numeric(self.df[self.idx_col], errors="coerce")
+            .astype(np.float32)
+            .values,
+            dtype=torch.float32
+        )
 
         if self.weights_col and self.weights_col in self.df.columns:
-            wv = pd.to_numeric(self.df[self.weights_col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(1.0).astype(np.float32).values
+            wv = pd.to_numeric(self.df[self.weights_col], errors="coerce").replace(
+                [np.inf, -np.inf], np.nan
+            ).fillna(1.0).astype(np.float32).values
             self.w = torch.tensor(wv, dtype=torch.float32)
         else:
             self.w = torch.ones(len(self.df), dtype=torch.float32)
 
-    def __len__(self): return len(self.idx_now)
+    def __len__(self):
+        return len(self.idx_now)
     def __getitem__(self, i):
         return (
             (self.X_num[i] if self.X_num is not None else torch.empty(0)),
@@ -1494,7 +890,7 @@ class MultiTaskQuantileNet(nn.Module):
         self.embs = nn.ModuleList()
         emb_dims = []
         for card in cat_cardinals:
-            dim = min(emb_cap, max(4, int(round(card**0.25)*4)))
+            dim = min(emb_cap, max(4, int(round(card**0.25) * 4)))
             self.embs.append(nn.Embedding(card+1, dim, padding_idx=0))
             emb_dims.append(dim)
         in_dim = num_dim + sum(emb_dims)
@@ -1510,7 +906,7 @@ class MultiTaskQuantileNet(nn.Module):
     def forward(self, x_num, x_cat):
         h = x_num if x_num.numel() != 0 else None
         if x_cat.numel() != 0:
-            emb = [emb_layer(x_cat[:, i]) for i,emb_layer in enumerate(self.embs)]
+            emb = [emb_layer(x_cat[:, i]) for i, emb_layer in enumerate(self.embs)]
             emb = torch.cat(emb, dim=1) if emb else None
             h = emb if h is None else torch.cat([h, emb], dim=1)
         z = self.trunk(h) if isinstance(self.trunk, nn.Sequential) else h
@@ -1522,7 +918,7 @@ def pinball_loss(pred, target, taus):
     losses = []
     for i, q in enumerate(taus):
         e = diff[:, i]
-        losses.append(torch.maximum(q*e, (q-1)*e))
+        losses.append(torch.maximum(q * e, (q - 1) * e))
     return torch.mean(torch.stack(losses, dim=1))
 
 # ============================================
@@ -1606,9 +1002,9 @@ def eval_split(model, loader, taus, head_ix: int):
         r2 = np.nan
 
     denom = np.nansum(np.abs(yv))
-    wape = float(np.nansum(np.abs(yv - pv)) / denom) if denom > 0 else np.nan
-    mdape = float(np.nanmedian(np.abs((yv - pv) / np.clip(np.abs(yv), 1e-9, None))))
-    pct10 = float(np.nanmean(np.abs(pv - yv) <= 0.10 * np.abs(yv)))
+    wape_val = float(np.nansum(np.abs(yv - pv)) / denom) if denom > 0 else np.nan
+    mdape_val = float(np.nanmedian(np.abs((yv - pv) / np.clip(np.abs(yv), 1e-9, None))))
+    pct10_val = float(np.nanmean(np.abs(pv - yv) <= 0.10 * np.abs(yv)))
 
     finite_pi = np.isfinite(true_d) & np.isfinite(p10_d) & np.isfinite(p90_d) & np.isfinite(pred_d)
     if finite_pi.sum() == 0:
@@ -1623,8 +1019,8 @@ def eval_split(model, loader, taus, head_ix: int):
         cover  = float(np.mean((y_pi >= p10_pi) & (y_pi <= p90_pi)))
         rel_w  = float(np.mean(width / np.clip(np.abs(p50_pi), MIN_LEVEL, None)))
 
-    return dict(mae=mae, r2=r2, wape=wape, mdape=mdape,
-                pct10=pct10, p90_p10_cover=cover, rel_width=rel_w)
+    return dict(mae=mae, r2=r2, wape=wape_val, mdape=mdape_val,
+                pct10=pct10_val, p90_p10_cover=cover, rel_width=rel_w)
 
 @torch.no_grad()
 def suppression_report(model, ds, taus, head_ix):
@@ -1719,44 +1115,33 @@ def train_one(model, ds_trn, ds_val, taus, head_weights=(1.0, 1.0)):
     return model
 
 # ============================================
-# PULL feat_sp TO PANDAS, WINSORIZE, BUILD FEATURES
+# PULL feat_df INTO TRAINING PANDAS DF, WINSORIZE, BUILD FEATURES
 # ============================================
-from snowflake.snowpark import functions as F, types as T
-
 START_DATE = "2022-01-01"
 HOLDOUT_DAYS = int(globals().get("HOLDOUT_DAYS", 60))
 VAL_FRACTION_OF_TRAIN_TIME = globals().get("VAL_FRACTION_OF_TRAIN_TIME", 1/6)
 RELIABILITY_C = globals().get("RELIABILITY_C", 2.5)
 
-if "EVT_IS_RENTAL" in feat_sp.columns:
-    feat_sp = feat_sp.drop("EVT_IS_RENTAL")
+pdf = feat_df.copy()
 
-date_col = "DAY_FOR_SPLIT" if "DAY_FOR_SPLIT" in feat_sp.columns else "YM"
-dtype = next(f.datatype for f in feat_sp.schema.fields if f.name == date_col)
+if "EVT_IS_RENTAL" in pdf.columns:
+    pdf = pdf.drop(columns=["EVT_IS_RENTAL"])
 
-if isinstance(dtype, T.DateType):
-    pred = F.col(date_col) >= F.to_date(F.lit(START_DATE))
-elif isinstance(dtype, T.TimestampType):
-    pred = F.col(date_col) >= F.to_timestamp_ntz(F.lit(START_DATE))
-else:
-    pred = F.to_date(F.col(date_col)) >= F.to_date(F.lit(START_DATE))
+date_col = "DAY_FOR_SPLIT" if "DAY_FOR_SPLIT" in pdf.columns else "YM"
+pdf[date_col] = pd.to_datetime(pdf[date_col], errors="coerce")
 
-fat_text = [c for c in ("URL", "STREETADDRESS", "DESCRIPTION") if c in feat_sp.columns]
-base = feat_sp.select(*[c for c in feat_sp.columns if c not in fat_text]).filter(pred)
+mask_start = pdf[date_col] >= pd.to_datetime(START_DATE)
 
-diag = base.select(
-    F.min(F.col(date_col)).alias("MIN_D"),
-    F.max(F.col(date_col)).alias("MAX_D"),
-    F.count(F.lit(1)).alias("N_ROWS")
-).collect()[0]
-print(f"[CELL11:DIAG] {date_col} range: {diag['MIN_D']} .. {diag['MAX_D']} | rows={diag['N_ROWS']:,}")
+fat_text = [c for c in ("URL", "STREETADDRESS", "DESCRIPTION") if c in pdf.columns]
+base = pdf.loc[mask_start, [c for c in pdf.columns if c not in fat_text]].copy()
 
-pdf_parts = []
-for b in base.to_pandas_batches():
-    pdf_parts.append(b)
-pdf = pd.concat(pdf_parts, ignore_index=True) if pdf_parts else base.to_pandas()
+diag_min = base[date_col].min()
+diag_max = base[date_col].max()
+print(f"[CELL11:DIAG] {date_col} range: {diag_min} .. {diag_max} | rows={len(base):,}")
 
-for c in ("YM","DAY_FOR_SPLIT"):
+pdf = base.copy()
+
+for c in ("YM", "DAY_FOR_SPLIT"):
     if c in pdf.columns:
         pdf[c] = pd.to_datetime(pdf[c], errors="coerce")
 
@@ -1777,10 +1162,10 @@ else:
 
 df_trn = pdf.loc[trn_mask].copy()
 
-def _winsor_train_only(df_trn: pd.DataFrame, df_full: pd.DataFrame, ycol: str, k: float) -> pd.DataFrame:
+def _winsor_train_only(df_trn_small: pd.DataFrame, df_full: pd.DataFrame, ycol: str, k: float) -> pd.DataFrame:
     key = ["STATE_MODE","YM"] if "STATE_MODE" in df_full.columns else ["YM"]
     fences: Dict[Any, Any] = {}
-    for gk, g in df_trn.groupby(key, dropna=False):
+    for gk, g in df_trn_small.groupby(key, dropna=False):
         s = pd.to_numeric(g[ycol], errors="coerce")
         if s.notna().sum() == 0:
             continue
@@ -1800,9 +1185,10 @@ def _winsor_train_only(df_trn: pd.DataFrame, df_full: pd.DataFrame, ycol: str, k
 LABEL_COLS = set(globals().get("LABEL_COLS", {"Y_H1","Y_H2","IDX_FUTURE_H1","IDX_FUTURE_H2"}))
 for ycol, k in [("Y_H1", 1.5), ("Y_H2", 3.0)]:
     if ycol in pdf.columns:
-        pdf = _winsor_train_only(df_trn[["STATE_MODE","YM",ycol]] if {"STATE_MODE","YM"}.issubset(df_trn.columns)
-                                 else df_trn[[c for c in ["YM", ycol] if c in df_trn.columns]],
-                                 pdf, ycol, k)
+        cols_small = ["YM", ycol]
+        if {"STATE_MODE","YM"}.issubset(df_trn.columns):
+            cols_small = ["STATE_MODE","YM", ycol]
+        pdf = _winsor_train_only(df_trn[cols_small], pdf, ycol, k)
 
 NON_FEATURE_KEYS = set(globals().get("NON_FEATURE_KEYS", {"ZIPCODE","YM","STATE_MODE","COUNTY_MODE","DAY_FOR_SPLIT"}))
 FUTUREISH_COLS   = set(globals().get("FUTUREISH_COLS", {"BASE_DLOG_H1","BASE_DLOG_H2","_BASE_FWD1","_BASE_FWD2","_BASE_NOW"}))
@@ -1956,14 +1342,15 @@ torch.save({
         QUANTILES=QUANTILES, CATEGORICAL_COLS=X_cols_cat, NUMERIC_COLS=X_cols_num
     ),
     "cat_maps": cat_maps,
-    "scaler_mean": scaler.mean_.tolist(),
-    "scaler_scale": scaler.scale_.tolist(),
+    "scaler_mean": scaler.mean_.tolist() if len(num_cols) > 0 else [],
+    "scaler_scale": scaler.scale_.tolist() if len(num_cols) > 0 else [],
     "split": split_meta,
     "metrics_holdout": {"H1": h1, "H2": h2},
 }, RUN_DIR / f"{ts}__{runname}.pt")
 
+import json as _json
 with open(RUN_DIR / f"{ts}__{runname}.json", "w") as f:
-    json.dump({
+    _json.dump({
         "metrics_holdout": {"H1": h1, "H2": h2},
         "split": split_meta,
         "shapes": dict(train=len(ds_trn), val=len(ds_val), holdout=len(ds_hld),
@@ -1988,14 +1375,16 @@ def rolling_backtest(pdf, n_folds=3, fold_len_days=60):
     # Only build folds over the labeled window
     days = pd.to_datetime(pdf.loc[labels_ok, tcol])
     tmin, tmax = days.min(), days.max()
+
     folds = []
     for i in range(n_folds):
-        hold_end = tmax - pd.Timedelta(days=i*fold_len_days)
-        hold_start = hold_end - pd.Timedelta(days=fold_len_days-1)
+        hold_end = tmax - pd.Timedelta(days=i * fold_len_days)
+        hold_start = hold_end - pd.Timedelta(days=fold_len_days - 1)
         train_end = hold_start - pd.Timedelta(days=1)
         folds.append((train_end, hold_start, hold_end))
+
     results = []
-    for k,(train_end, hold_start, hold_end) in enumerate(folds[::-1], 1):
+    for k, (train_end, hold_start, hold_end) in enumerate(folds[::-1], 1):
         print(f"\n[Fold {k}] train ≤ {train_end.date()} | holdout=[{hold_start.date()} … {hold_end.date()}]")
 
         trn_mask = labels_ok & (pdf[tcol] <= train_end)
@@ -2026,9 +1415,10 @@ def rolling_backtest(pdf, n_folds=3, fold_len_days=60):
         model = train_one(model, ds_trn, ds_trn, QUANTILES)
 
         dl_h = DataLoader(ds_hld, batch_size=BATCH_SIZE, shuffle=False)
-        h1 = eval_split(model, dl_h, QUANTILES, 0)
-        h2 = eval_split(model, dl_h, QUANTILES, 1)
-        results.append(dict(fold=k, H1=h1, H2=h2))
+        h1_f = eval_split(model, dl_h, QUANTILES, 0)
+        h2_f = eval_split(model, dl_h, QUANTILES, 1)
+        results.append(dict(fold=k, H1=h1_f, H2=h2_f))
+
     return results
 
 # ============================================

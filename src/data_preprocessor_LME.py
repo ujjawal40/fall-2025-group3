@@ -107,7 +107,7 @@ class DataPreprocessor:
         if not isinstance(requested, Path):
             requested = Path(requested)
 
-       
+
         search_roots = []
         if requested.is_absolute():
             search_roots.append(requested)
