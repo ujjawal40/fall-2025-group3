@@ -24,3 +24,30 @@ fall-2025-group3/
 │  └─ sub_sample.csv             # ← place the data file here (not tracked)
 ├─ README.md
 └─ LICENSE
+
+🚀 Quick Start
+1) Clone and create a virtual environment
+git clone <YOUR-REPO-URL>.git
+cd fall-2025-group3
+
+python -m venv .venv
+# macOS / Linux
+source .venv/bin/activate
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install numpy pandas scikit-learn torch matplotlib tqdm
+
+2) Put the data in place
+
+Download sub_sample.csv (GWU Box) and put it here:
+# verify file is present
+ls -lh src/sub_sample.csv
+
+3) Run the LME model
+
+The filename has spaces—quote it:
+
+python "src/latend Manifold model.py"
+
