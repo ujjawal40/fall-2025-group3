@@ -59,4 +59,13 @@ git clone https://github.com/ujjawal40/fall-2025-group3.git
 cd fall-2025-group3
 ```
 
-
+**2) Put Data
+```bash
+# ensure the file exists at this exact path:
+ls -l src/sub_sample.csv
+```
+**3) Create & activate venv
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
