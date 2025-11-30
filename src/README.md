@@ -1,60 +1,60 @@
-🏡 Enhancing Residential Property Valuation via Latent Manifold Estimation (LME)
-This project implements the Latent Manifold Estimation (LME) model to enhance residential property valuation. LME combines Neural Intrinsic Value (based on home attributes) with Non-Parametric Spatial Desirability (using KD-Tree neighbors).
+# 🏠 Enhancing Residential Property Valuation via Latent Manifold Estimation (LME)
 
-The training utilizes an EM-style approach with spatial splits to ensure robustness against data leakage, and reports paper-style accuracy metrics.
+Neural intrinsic value **+** non-parametric spatial desirability learned with an EM-style loop.  
+This repo exposes a clean, reproducible **LME** pipeline located in `src/` with reusable modules under `src/component/`.
 
-📁 Project Structure
-The project follows a modular structure, with all core code residing in the src/ directory.
+---
 
-.
-├── src/
-│   ├── lme_main.py         # Main execution script
-│   ├── requirements.txt    # List of required Python dependencies
-│   └── component/
-│       ├── config_LME.py
-│       ├── utils_LME.py
-│       ├── data_io_LME.py
-│       ├── splits_LME.py
-│       ├── surface.py
-│       ├── model_LME.py
-│       ├── trainer_LME.py
-│       ├── metrics_LME.py
-│       └── visulization_LME.py
-└── results/                # Created on first run: stores training logs and evaluation outputs
+## Table of Contents
+- [Directory](#directory)
+- [Data](#data)
+- [Quick Start](#quick-start)
+- [What the Pipeline Does](#what-the-pipeline-does)
+- [Configuration (Optional)](#configuration-optional)
+- [Outputs](#outputs)
+- [Troubleshooting](#troubleshooting)
+- [Environment](#environment)
+
+---
+
+## Directory
+fall-2025-group3/
+├─ src/
+│ ├─ lme_main.py # main entry
+│ ├─ requirements.txt # deps (kept in src/)
+│ └─ component/
+│ ├─ config_LME.py # HParams + paths (RESULTS_DIR, FIG_DIR)
+│ ├─ utils_LME.py # seeds, standardize-by-train, helpers
+│ ├─ data_io_LME.py # load + preprocess
+│ ├─ splits_LME.py # spatial splits + lat/lon→meters
+│ ├─ surface.py # KernelSurface, LaplacianOp
+│ ├─ model_LME.py # IntrinsicPriceNet (parametric part)
+│ ├─ trainer_LME.py # EM loop (E: D, M: W)
+│ ├─ metrics_LME.py # paper-style metrics + CSV writer
+│ └─ visulization_LME.py # plots + results markdown
+└─ results/ # created on first run
 
 
-That text is a little hard to read! I can certainly reformat this into a much cleaner and more professional README structure, focusing on a clear, step-by-step setup guide using proper Bash syntax.
+---
 
-Here is the enhanced README content:
+## Data
 
-🏡 Enhancing Residential Property Valuation via Latent Manifold Estimation (LME)
-This project implements the Latent Manifold Estimation (LME) model to enhance residential property valuation. LME combines Neural Intrinsic Value (based on home attributes) with Non-Parametric Spatial Desirability (using KD-Tree neighbors).
+Download the dataset (approved for README) and place it **exactly** at:
 
-The training utilizes an EM-style approach with spatial splits to ensure robustness against data leakage, and reports paper-style accuracy metrics.
+src/sub_sample.csv
 
-📁 Project Structure
-The project follows a modular structure, with all core code residing in the src/ directory.
+Source (GW Box):  
+https://gwu.box.com/s/c38fp0sbxkcy2dwl31jnqbgaklso6136
 
-.
-├── src/
-│   ├── lme_main.py         # Main execution script
-│   ├── requirements.txt    # List of required Python dependencies
-│   └── component/
-│       ├── config_LME.py
-│       ├── utils_LME.py
-│       ├── data_io_LME.py
-│       ├── splits_LME.py
-│       ├── surface.py
-│       ├── model_LME.py
-│       ├── trainer_LME.py
-│       ├── metrics_LME.py
-│       └── visulization_LME.py
-└── results/                # Created on first run: stores training logs and evaluation outputs
+> The loader also tries `src/data/sub_sample.csv`, `data/src/sub_sample.csv`, `data/sub_sample.csv`, but **`src/sub_sample.csv`** is the simplest.
 
-🚀 1. Setup Environment
-This section outlines the steps to clone the repository and set up your Python virtual environment.
+---
 
-1.1. Clone the Repository
-Use the following Bash commands to clone the project and navigate into the directory:
+## Quick Start
+
+**1) Clone**
+```bash
 git clone https://github.com/ujjawal40/fall-2025-group3.git
 cd fall-2025-group3
+```
+
