@@ -18,6 +18,7 @@ This repo exposes a clean, reproducible **LME** pipeline located in `src/` with 
 ---
 
 ## Directory
+```
 fall-2025-group3/
 ├─ src/
 │ ├─ lme_main.py # main entry
@@ -34,7 +35,7 @@ fall-2025-group3/
 │ └─ visulization_LME.py # plots + results markdown
 └─ results/ # created on first run
 
-
+```
 ---
 
 ## Data
@@ -57,4 +58,5 @@ https://gwu.box.com/s/c38fp0sbxkcy2dwl31jnqbgaklso6136
 git clone https://github.com/ujjawal40/fall-2025-group3.git
 cd fall-2025-group3
 ```
+
 
