@@ -1,56 +1,60 @@
-Enhancing Residential Property Valuation via Latent Manifold Estimation (LME)
+🏡 Enhancing Residential Property Valuation via Latent Manifold Estimation (LME)
+This project implements the Latent Manifold Estimation (LME) model to enhance residential property valuation. LME combines Neural Intrinsic Value (based on home attributes) with Non-Parametric Spatial Desirability (using KD-Tree neighbors).
 
-Neural intrinsic value (home attributes) + non-parametric spatial desirability (KD-Tree neighbors).
-EM-style training, spatial splits to avoid leakage, and paper-style accuracy metrics.
+The training utilizes an EM-style approach with spatial splits to ensure robustness against data leakage, and reports paper-style accuracy metrics.
+
+📁 Project Structure
+The project follows a modular structure, with all core code residing in the src/ directory.
 
 .
-├─ src/
-│  ├─ lme_main.py
-│  ├─ requirements.txt
-│  └─ component/
-│     ├─ config_LME.py
-│     ├─ utils_LME.py
-│     ├─ data_io_LME.py
-│     ├─ splits_LME.py
-│     ├─ surface.py
-│     ├─ model_LME.py
-│     ├─ trainer_LME.py
-│     ├─ metrics_LME.py
-│     └─ visulization_LME.py
-└─ results/            # created on first run
+├── src/
+│   ├── lme_main.py         # Main execution script
+│   ├── requirements.txt    # List of required Python dependencies
+│   └── component/
+│       ├── config_LME.py
+│       ├── utils_LME.py
+│       ├── data_io_LME.py
+│       ├── splits_LME.py
+│       ├── surface.py
+│       ├── model_LME.py
+│       ├── trainer_LME.py
+│       ├── metrics_LME.py
+│       └── visulization_LME.py
+└── results/                # Created on first run: stores training logs and evaluation outputs
 
-1) Setup Environment
-# Clone the repo
+
+That text is a little hard to read! I can certainly reformat this into a much cleaner and more professional README structure, focusing on a clear, step-by-step setup guide using proper Bash syntax.
+
+Here is the enhanced README content:
+
+🏡 Enhancing Residential Property Valuation via Latent Manifold Estimation (LME)
+This project implements the Latent Manifold Estimation (LME) model to enhance residential property valuation. LME combines Neural Intrinsic Value (based on home attributes) with Non-Parametric Spatial Desirability (using KD-Tree neighbors).
+
+The training utilizes an EM-style approach with spatial splits to ensure robustness against data leakage, and reports paper-style accuracy metrics.
+
+📁 Project Structure
+The project follows a modular structure, with all core code residing in the src/ directory.
+
+.
+├── src/
+│   ├── lme_main.py         # Main execution script
+│   ├── requirements.txt    # List of required Python dependencies
+│   └── component/
+│       ├── config_LME.py
+│       ├── utils_LME.py
+│       ├── data_io_LME.py
+│       ├── splits_LME.py
+│       ├── surface.py
+│       ├── model_LME.py
+│       ├── trainer_LME.py
+│       ├── metrics_LME.py
+│       └── visulization_LME.py
+└── results/                # Created on first run: stores training logs and evaluation outputs
+
+🚀 1. Setup Environment
+This section outlines the steps to clone the repository and set up your Python virtual environment.
+
+1.1. Clone the Repository
+Use the following Bash commands to clone the project and navigate into the directory:
 git clone https://github.com/ujjawal40/fall-2025-group3.git
 cd fall-2025-group3
-
-# (Recommended) Create & activate a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate           # Windows PowerShell:  .venv\Scripts\Activate.ps1
-
-# Install Python dependencies (requirements are kept under src/)
-python3 -m pip install --upgrade pip
-python3 -m pip install -r src/requirements.txt
-
-2) Get the Data
-# Download from GW Box (public to your professor)
-https://gwu.box.com/s/c38fp0sbxkcy2dwl31jnqbgaklso6136
-
-# Place the CSV here (exact name is flexible, but simplest is):
-#   src/sub_sample.csv
-#
-# Auto-fallback search paths if you prefer:
-#   src/data/sub_sample.csv
-#   data/src/sub_sample.csv
-#   data/sub_sample.csv
-
-3) Train & Evaluate (LME)
-# From repo root:
-cd src
-python3 lme_main.py
-
-4) View Results
-ls ../results
-
-
-
