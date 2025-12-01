@@ -104,17 +104,17 @@ python -m pip install -r src/requirements.txt
 
 ##After this, you can run either (or both) algorithms.
 
-🚀 Component 1 — ZIP×Month MultiTaskQuantileNet Pipeline
+**🚀 Component 1 — ZIP×Month MultiTaskQuantileNet Pipeline**
 
-Goal: End-to-end forecasting pipeline that:
+-Goal: End-to-end forecasting pipeline that:
 
-Flattens PRICEHISTORY into event rows
+-Flattens PRICEHISTORY into event rows
 
-Builds rich ZIP×Month features (lags, indices, macro, momentum, etc.)
+-Builds rich ZIP×Month features (lags, indices, macro, momentum, etc.)
 
-Trains a multi-task, multi-quantile MLP (MultiTaskQuantileNet)
+-Trains a multi-task, multi-quantile MLP (MultiTaskQuantileNet)
 
-Evaluates performance via rolling backtests
+-Evaluates performance via rolling backtests
 
 🔧 Entry point
 
@@ -124,7 +124,7 @@ From the repo root:
 cd src
 python time_series_analysis.py
 ```
-## What this script does (high level)
+**What this script does (high level)**
 
 -Loads config from component/config.py (paths, hyperparameters, run IDs).
 
@@ -148,7 +148,7 @@ python time_series_analysis.py
 
 -Evaluates metrics (metrics.py, evaluation.py) and saves plots (visualization.py) under ../results/.
 
-🌈 Component 2 — Latent Manifold Estimation (LME)
+**🌈 Component 2 — Latent Manifold Estimation (LME)**
 
 Goal: Separate:
 
@@ -167,25 +167,25 @@ cd src
 python "latend Manifold model.py"
 ```
 
-What this script does (high level)
+**What this script does (high level)**
 
-Loads LME config from component/config_LME.py.
+-Loads LME config from component/config_LME.py.
 
-Reads the same src/sub_sample.csv, using data_io_LME.py / data_preprocessor_LME.py.
+-Reads the same src/sub_sample.csv, using data_io_LME.py / data_preprocessor_LME.py.
 
-Builds an intrinsic feature matrix for properties.
+-Builds an intrinsic feature matrix for properties.
 
-Defines the intrinsic value network and related components in model_LME.py.
+-Defines the intrinsic value network and related components in model_LME.py.
 
-Uses surface.py to construct a kernel-based spatial surface with Laplacian regularization.
+-Uses surface.py to construct a kernel-based spatial surface with Laplacian regularization.
 
-Runs the EM-style loop in trainer_LME.py:
+-Runs the EM-style loop in trainer_LME.py:
 
-E-step: estimate spatial desirability field D(x, y) given current network weights.
+-E-step: estimate spatial desirability field D(x, y) given current network weights.
 
-M-step: update intrinsic network weights W conditioned on D.
+-M-step: update intrinsic network weights W conditioned on D.
 
-Computes LME metrics (metrics_LME.py) and produces desirability / diagnostic plots (visualization_LME.py).
+-Computes LME metrics (metrics_LME.py) and produces desirability / diagnostic plots (visualization_LME.py).
 
-Writes outputs to an LME-specific subdirectory inside ../results/.
+-Writes outputs to an LME-specific subdirectory inside ../results/.
 
