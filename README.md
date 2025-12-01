@@ -78,6 +78,7 @@ fall-2025-group3/
 https://gwu.box.com/s/c38fp0sbxkcy2dwl31jnqbgaklso6136
 
 ##⚙️ Quick Start (common setup for BOTH algorithms)
+
 **1) Clone the repo**
 
 ```bash
