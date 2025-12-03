@@ -87,7 +87,7 @@ cd fall-2025-group3
 ```
 **2) Put the data in src/**
 ```bash
-# make sure the file exists at this exact path:
+
 ls -l src/sub_sample.csv
 ```
 
