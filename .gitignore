@@ -1,1 +1,6 @@
-*.pem
+.venv/
+.DS_Store
+.idea/
+__pycache__/
+*.pyc
+src/sub_sample.csv

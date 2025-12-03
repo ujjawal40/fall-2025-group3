@@ -1,0 +1,17 @@
+# macOS metadata
+.DS_Store
+
+# IDE configs
+.idea/
+
+# Private keys (never commit)
+*.pem
+
+# Model weights / checkpoints
+*.pt
+*.pth
+
+# Generated plots and run logs
+src/*.png
+src/figs/
+src/runlog/

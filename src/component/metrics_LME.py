@@ -95,6 +95,35 @@ def _write_csv_with_header(path: str, rows: list[Dict[str, Any]]) -> None:
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
+        row.update(extra)
+
+    per_run_path = os.path.join(results_dir, f"{ts}_{basename}.csv")
+    log_path     = os.path.join(results_dir, f"{basename}_log.csv")
+
+    # write per-run file (with header)
+    _write_csv_with_header(per_run_path, [row])
+
+    # append into cumulative log (create with header if missing)
+    _append_csv_with_header(log_path, row)
+
+    return per_run_path
+
+def _write_csv_with_header(path: str, rows: list[Dict[str, Any]]) -> None:
+    fieldnames = _ordered_fieldnames(rows[0])
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+def _append_csv_with_header(path: str, row: Dict[str, Any]) -> None:
+    exists = os.path.exists(path)
+    fieldnames = _ordered_fieldnames(row)
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            w.writeheader()
+
         for r in rows:
             w.writerow(r)
 
